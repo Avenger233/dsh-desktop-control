@@ -111,34 +111,25 @@ function check(name, ok, detail) {
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-// A deterministic WinForms window for the windows / UIA / OCR checks.
+// A deterministic UIA-native (WPF) window for the windows / UIA / invoke / OCR checks.
 const FORM_SCRIPT = `
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName System.Drawing
-$form = New-Object System.Windows.Forms.Form
-$form.Text = 'DSH OCR Test Window'
-$form.Width = 760
-$form.Height = 440
-$form.StartPosition = 'Manual'
-$form.Left = 320
-$form.Top = 220
-$form.TopMost = $true
-$label = New-Object System.Windows.Forms.Label
-$label.Text = 'HELLO OCR 42 保存'
-$label.Font = New-Object System.Drawing.Font('Segoe UI', 28, [System.Drawing.FontStyle]::Bold)
-$label.AutoSize = $true
-$label.Left = 40
-$label.Top = 70
-$form.Controls.Add($label)
-$button = New-Object System.Windows.Forms.Button
-$button.Text = 'PUSH ME'
-$button.Font = New-Object System.Drawing.Font('Segoe UI', 18)
-$button.Left = 40
-$button.Top = 200
-$button.Width = 240
-$button.Height = 80
-$form.Controls.Add($button)
-[void]$form.ShowDialog()
+Add-Type -AssemblyName PresentationFramework
+Add-Type -AssemblyName PresentationCore
+Add-Type -AssemblyName WindowsBase
+[xml]$xaml = @"
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="DSH OCR Test Window" Width="720" Height="380" WindowStartupLocation="Manual" Left="320" Top="220" Topmost="True">
+  <StackPanel Margin="30">
+    <TextBlock Text="HELLO OCR 42 保存" FontSize="32" FontWeight="Bold"/>
+    <Button x:Name="pushButton" Content="PUSH ME" FontSize="20" Width="240" Height="70" HorizontalAlignment="Left" Margin="0,30,0,0"/>
+  </StackPanel>
+</Window>
+"@
+$window = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader $xaml))
+$button = $window.FindName('pushButton')
+$button.Add_Click({ $button.Content = 'INVOKED' })
+[void]$window.ShowDialog()
 `;
 
 async function main() {
@@ -189,6 +180,12 @@ async function main() {
       const elements = await call({ cmd: 'elements', window: 'DSH OCR Test Window', depth: 5, max: 60 });
       const names = (elements.elements ?? []).map((row) => row.name);
       check('elements: UIA label and button', names.includes('HELLO OCR 42 保存') && names.includes('PUSH ME'), names.slice(0, 6).join(' | '));
+      const invoked = await call({ cmd: 'invoke', window: 'DSH OCR Test Window', filter: 'PUSH ME' });
+      check('invoke: UIA InvokePattern fires', invoked.method === 'InvokePattern', `${invoked.method} on "${invoked.name}"`);
+      await delay(350);
+      const afterInvoke = await call({ cmd: 'elements', window: 'DSH OCR Test Window', depth: 5, max: 60 });
+      const namesAfterInvoke = (afterInvoke.elements ?? []).map((row) => row.name);
+      check('invoke: control reacted', namesAfterInvoke.includes('INVOKED'), namesAfterInvoke.slice(0, 6).join(' | '));
       const ocr = await call({ cmd: 'ocr', window: 'DSH OCR Test Window' });
       const ocrTexts = (ocr.lines ?? []).map((line) => line.text);
       const hit = ocrTexts.some((text) => text.toUpperCase().includes('HELLO') || text.includes('保存') || text.includes('亻'));
@@ -212,6 +209,11 @@ async function main() {
 
     const region = await call({ cmd: 'screenshot', x: screen.left + 10, y: screen.top + 10, width: 320, height: 200, path: join(dir, 'region.png'), maxDimension: 160 });
     check('region screenshot scaling', region.width === 160 && region.height === 100, `${region.width}x${region.height} from 320x200`);
+
+    const overlayPath = join(dir, 'overlay.png');
+    const overlay = await call({ cmd: 'screenshot', x: screen.left + 10, y: screen.top + 10, width: 400, height: 300, path: overlayPath, grid: true, cursor: true });
+    const overlayBytes = await readFile(overlayPath);
+    check('screenshot overlay (grid + cursor)', overlayBytes.subarray(0, 8).equals(PNG_SIGNATURE) && overlay.width === 400 && overlay.height === 300, `${overlay.width}x${overlay.height}, ${overlayBytes.length} bytes`);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

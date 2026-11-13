@@ -7,7 +7,7 @@
 # setting can corrupt non-ASCII text (typed characters, window titles).
 #
 # Commands: ping, state, move, click, down, up, drag, scroll, key, keydown,
-# keyup, type, screenshot, windows, activate, elements, ocr, sleep, quit.
+# keyup, type, screenshot, invoke, windows, activate, elements, ocr, sleep, quit.
 # See the switch in the main loop for fields.
 
 $ErrorActionPreference = 'Stop'
@@ -568,6 +568,64 @@ function Test-BitmapBlank($bitmap) {
     return $true
 }
 
+function Draw-ScreenshotOverlay($bitmap, [int]$left, [int]$top, [bool]$grid, [bool]$cursor) {
+    Ensure-Drawing
+    $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+    try {
+        $graphics.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+        if ($grid) {
+            $step = 120
+            $longest = [Math]::Max($bitmap.Width, $bitmap.Height)
+            while (($longest / $step) -gt 14) { $step *= 2 }
+            $pen = New-Object System.Drawing.Pen -ArgumentList @([System.Drawing.Color]::FromArgb(110, 80, 200, 255), 1)
+            $font = New-Object System.Drawing.Font -ArgumentList @('Segoe UI', 9)
+            $labelBackground = New-Object System.Drawing.SolidBrush -ArgumentList @([System.Drawing.Color]::FromArgb(170, 0, 0, 0))
+            try {
+                $startX = [int]([Math]::Ceiling($left / [double]$step) * $step)
+                for ($x = $startX; $x -le ($left + $bitmap.Width); $x += $step) {
+                    $pixelX = $x - $left
+                    if ($pixelX -lt 0) { continue }
+                    $graphics.DrawLine($pen, $pixelX, 0, $pixelX, $bitmap.Height)
+                    $label = [string]$x
+                    $size = $graphics.MeasureString($label, $font)
+                    $graphics.FillRectangle($labelBackground, $pixelX + 1, 1, $size.Width + 2, $size.Height)
+                    $graphics.DrawString($label, $font, [System.Drawing.Brushes]::White, $pixelX + 2, 1)
+                }
+                $startY = [int]([Math]::Ceiling($top / [double]$step) * $step)
+                for ($y = $startY; $y -le ($top + $bitmap.Height); $y += $step) {
+                    $pixelY = $y - $top
+                    if ($pixelY -lt 0) { continue }
+                    $graphics.DrawLine($pen, 0, $pixelY, $bitmap.Width, $pixelY)
+                    $label = [string]$y
+                    $size = $graphics.MeasureString($label, $font)
+                    $graphics.FillRectangle($labelBackground, 1, $pixelY + 1, $size.Width + 2, $size.Height)
+                    $graphics.DrawString($label, $font, [System.Drawing.Brushes]::White, 2, $pixelY + 1)
+                }
+            }
+            finally {
+                $pen.Dispose()
+                $font.Dispose()
+                $labelBackground.Dispose()
+            }
+        }
+        if ($cursor) {
+            $position = [DeskInput]::Cursor()
+            $cursorX = $position[0] - $left
+            $cursorY = $position[1] - $top
+            if ($cursorX -ge 0 -and $cursorY -ge 0 -and $cursorX -lt $bitmap.Width -and $cursorY -lt $bitmap.Height) {
+                $crossPen = New-Object System.Drawing.Pen -ArgumentList @([System.Drawing.Color]::FromArgb(220, 255, 40, 40), 2)
+                try {
+                    $graphics.DrawLine($crossPen, $cursorX - 20, $cursorY, $cursorX + 20, $cursorY)
+                    $graphics.DrawLine($crossPen, $cursorX, $cursorY - 20, $cursorX, $cursorY + 20)
+                    $graphics.DrawEllipse($crossPen, $cursorX - 7, $cursorY - 7, 14, 14)
+                }
+                finally { $crossPen.Dispose() }
+            }
+        }
+    }
+    finally { $graphics.Dispose() }
+}
+
 function Get-WindowBitmap([long]$handle) {
     Ensure-Drawing
     $rect = [DeskInput]::WindowRect($handle)
@@ -931,6 +989,10 @@ function Handle-Command($cmd) {
                 $graphics.Dispose()
             }
 
+            $drawGrid = $cmd.grid -eq $true
+            $drawCursor = $cmd.cursor -eq $true
+            if ($drawGrid -or $drawCursor) { Draw-ScreenshotOverlay $bitmap $left $top $drawGrid $drawCursor }
+
             $maxDimension = Clamp-Int $cmd.maxDimension 0 0 10000
             $sourceWidth = $width
             $sourceHeight = $height
@@ -961,7 +1023,76 @@ function Handle-Command($cmd) {
                 $bitmap.Dispose()
             }
             $file = New-Object System.IO.FileInfo -ArgumentList @($path)
-            return @{ ok = $true; path = $path; width = $width; height = $height; sourceWidth = $sourceWidth; sourceHeight = $sourceHeight; bytes = $file.Length; left = $left; top = $top }
+            return @{ ok = $true; path = $path; width = $width; height = $height; sourceWidth = $sourceWidth; sourceHeight = $sourceHeight; bytes = $file.Length; left = $left; top = $top; grid = $drawGrid; cursor = $drawCursor }
+        }
+        'invoke' {
+            $handle = Get-WindowHandle $cmd.window $cmd.hwnd
+            if ($null -eq $cmd.filter -or ([string]$cmd.filter).Trim().Length -eq 0) {
+                throw 'invoke requires filter (control name or role substring)'
+            }
+            $needle = ([string]$cmd.filter).Trim().ToLowerInvariant()
+            Ensure-Uia
+            $root = [System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]$handle)
+            if ($null -eq $root) { throw 'UI Automation could not attach to the window' }
+            $walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
+            $queue = New-Object System.Collections.Queue
+            $queue.Enqueue($root)
+            $candidates = New-Object System.Collections.ArrayList
+            $visited = 0
+            while ($queue.Count -gt 0 -and $visited -lt 800) {
+                $element = $queue.Dequeue()
+                $visited++
+                try {
+                    $name = [string]$element.Current.Name
+                    if ($name.Length -gt 0 -and $name.ToLowerInvariant().Contains($needle)) { [void]$candidates.Add($element) }
+                }
+                catch { }
+                try {
+                    $child = $walker.GetFirstChild($element)
+                    while ($null -ne $child) {
+                        $queue.Enqueue($child)
+                        $child = $walker.GetNextSibling($child)
+                    }
+                }
+                catch { }
+            }
+            if ($candidates.Count -eq 0) { throw "no UI Automation control matches '$($cmd.filter)'" }
+            $matched = $null
+            $method = ''
+            foreach ($candidate in $candidates) {
+                try {
+                    $invokePattern = $null
+                    if ($candidate.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern, [ref]$invokePattern)) {
+                        $invokePattern.Invoke()
+                        $matched = $candidate
+                        $method = 'InvokePattern'
+                        break
+                    }
+                }
+                catch { }
+            }
+            if ($null -eq $matched) {
+                foreach ($candidate in $candidates) {
+                    try {
+                        $legacyPattern = $null
+                        if ($candidate.TryGetCurrentPattern([System.Windows.Automation.LegacyIAccessiblePattern]::Pattern, [ref]$legacyPattern)) {
+                            $legacyPattern.DoDefaultAction()
+                            $matched = $candidate
+                            $method = 'LegacyIAccessible'
+                            break
+                        }
+                    }
+                    catch { }
+                }
+            }
+            if ($null -eq $matched) {
+                $summary = @($candidates | Select-Object -First 5 | ForEach-Object {
+                    try { "$([string]$_.Current.ControlType.ProgrammaticName):$([string]$_.Current.Name)" } catch { '?' }
+                }) -join ', '
+                throw "matched control(s) but none exposes an invoke pattern ($summary); click by coordinates instead"
+            }
+            [DeskInput]::Sleep(150)
+            return @{ ok = $true; name = [string]$matched.Current.Name; role = [string]$matched.Current.ControlType.ProgrammaticName; method = $method; window = [DeskInput]::WindowInfo($handle) }
         }
         'windows' {
             $needle = ''

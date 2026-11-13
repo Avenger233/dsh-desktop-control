@@ -19,9 +19,9 @@ Seven tools, visible to every session in the dsh profile where the bundle is ins
 | `desktop_mouse` | move, click (left/right/middle, single/double/multi), drag, scroll, press/release |
 | `desktop_keyboard` | type Unicode text (Chinese, emoji, any symbol), press hotkeys, hold/release keys |
 | `desktop_state` | cursor position, virtual-screen bounds, foreground window (process/title/rectangle), currently held keys |
-| `desktop_screenshot` | capture the whole virtual desktop or a region and return it to the model as an image |
+| `desktop_screenshot` | capture the whole virtual desktop or a region and return it to the model as an image; optional labelled coordinate grid and cursor crosshair |
 | `desktop_find` | local Windows OCR locates on-screen text and returns exact screen coordinates; `click:true` clicks it in the same call — no image, no vision tokens |
-| `desktop_window` | list visible windows, activate one, or read UI Automation controls (role, name, centre point) without a screenshot |
+| `desktop_window` | list visible windows, activate one, read UI Automation controls (role, name, centre point), or fire a control default action with UIA InvokePattern |
 | `desktop_sequence` | run several actions (click, find, wait, screenshot, ...) in one tool call |
 
 The schemas are visible to every session in the profile and cost tokens on every request, whether used or not; disable the bundle when you don't need it.
@@ -32,7 +32,7 @@ The schemas are visible to every session in the profile and cost tokens on every
 
 ### Windows and UI Automation
 
-`desktop_window` lists visible windows (`hwnd`, process, title, rectangle), activates one, or returns UI Automation controls as `role | name | x,y`. Native controls work well; Chromium, Electron and Qt custom-drawn surfaces expose only their shell — use `desktop_find` or `desktop_screenshot` there.
+`desktop_window` lists visible windows (`hwnd`, process, title, rectangle), activates one, or returns UI Automation controls as `role | name | x,y`. `action=invoke` fires a control's default action through UI Automation (InvokePattern, falling back to LegacyIAccessible) without moving the pointer — the most reliable way to press a native button. UIA-native apps (WPF, UWP, Explorer) work well; Chromium, Electron and Qt custom-drawn surfaces expose only their shell — use `desktop_find` or `desktop_screenshot` there.
 
 ### Batching
 
@@ -77,7 +77,7 @@ Verify with a screenshot from a session, or run the manual self-test:
 node scripts/selftest.mjs
 ```
 
-It moves the cursor for a moment, presses F24 once, opens and closes a temporary WinForms window, checks window enumeration / activation / UI Automation / OCR against it, captures screenshots and restores the cursor. Don't move the mouse while it runs.
+It moves the cursor for a moment, presses F24 once, opens and closes a temporary WPF window, checks window enumeration / activation / UI Automation / InvokePattern / OCR against it, captures screenshots (including the grid and cursor overlay) and restores the cursor. Don't move the mouse while it runs.
 
 ## Example prompts
 
@@ -115,6 +115,7 @@ This is a high-privilege plugin.
 - Multi-monitor layouts and non-100% DPI scaling are supported by design (virtual-screen coordinates + per-monitor DPI awareness) but have not been tested — please open an issue with your layout.
 - `desktop_find` depends on Windows OCR: short or unusual characters can be missed or misread (that is why it reports scores and closest lines). It needs an OCR language pack; Windows 10/11 normally has one for the display language.
 - `desktop_window elements` sees only native controls; Chromium/Electron/Qt surfaces return just their shell (use `desktop_find` or a screenshot).
+- `desktop_window invoke` needs a control that exposes InvokePattern. UIA-native apps (WPF, UWP, Explorer) usually do; some classic Win32/MSAA controls surface as a generic Pane without it — click them by coordinates instead.
 - A window captured with `PrintWindow` can come back blank for GPU-rendered apps; capture the foreground screen or activate the window instead.
 - `desktop_sequence` steps run back to back without waiting for animations; add `{"action":"wait","waitMs":...}` where the UI needs time.
 - Enterprise AppLocker / constrained-language policies or security software can block the PowerShell helper.

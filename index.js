@@ -312,6 +312,8 @@ const SCREENSHOT_SCHEMA = {
     y: { type: 'number', description: 'Top edge of the region in screen pixels; defaults to the top edge of the virtual screen.' },
     width: { type: 'number', description: 'Region width in pixels; defaults to the rest of the virtual screen from x.' },
     height: { type: 'number', description: 'Region height in pixels; defaults to the rest of the virtual screen from y.' },
+    grid: { type: 'boolean', description: 'Draw a labelled coordinate grid on the capture; labels are screen pixel coordinates. Defaults to false.' },
+    cursor: { type: 'boolean', description: 'Stamp a red crosshair at the current cursor position. Defaults to false.' },
   },
 };
 
@@ -336,11 +338,11 @@ const WINDOW_SCHEMA = {
   properties: {
     action: {
       type: 'string',
-      enum: ['list', 'activate', 'elements'],
-      description: 'list: visible windows with ids, process names and rectangles. activate: bring a window to the foreground. elements: UI Automation controls (role, name, centre point) of a window, no image needed.',
+      enum: ['list', 'activate', 'elements', 'invoke'],
+      description: 'list: visible windows with ids, process names and rectangles. activate: bring a window to the foreground. elements: UI Automation controls (role, name, centre point) of a window, no image needed. invoke: fire a control default action through UI Automation (InvokePattern), with window + filter required.',
     },
-    window: { type: 'string', description: 'Window title or process name substring. Required for activate and elements.' },
-    filter: { type: 'string', description: 'list: keep windows whose title or process contains this text. elements: keep controls whose name or role contains this text.' },
+    window: { type: 'string', description: 'Window title or process name substring. Required for activate, elements and invoke.' },
+    filter: { type: 'string', description: 'list: keep windows whose title or process contains this text. elements/invoke: control name or role substring.' },
     top: { type: 'integer', description: 'list: maximum rows; defaults to 30.' },
     depth: { type: 'integer', description: 'elements: UI Automation tree depth; defaults to 4 (max 10).' },
     max: { type: 'integer', description: 'elements: maximum rows; defaults to 120 (max 500).' },
@@ -359,7 +361,7 @@ const SEQUENCE_SCHEMA = {
         properties: {
           action: {
             type: 'string',
-            enum: ['move', 'click', 'drag', 'scroll', 'mouse_down', 'mouse_up', 'type', 'press', 'key_down', 'key_up', 'find', 'activate', 'windows', 'elements', 'wait', 'screenshot'],
+            enum: ['move', 'click', 'drag', 'scroll', 'mouse_down', 'mouse_up', 'type', 'press', 'key_down', 'key_up', 'find', 'activate', 'windows', 'elements', 'invoke', 'wait', 'screenshot'],
             description: 'Action for this step; the remaining fields are the same as the matching desktop_* tool.',
           },
           waitMs: { type: 'number', description: 'wait: milliseconds to pause; defaults to 300.' },
@@ -575,7 +577,14 @@ export function apply(ctx) {
     let image;
     for (let attempt = 0; ; attempt++) {
       const path = join(SCREENSHOT_DIR, `shot-${Date.now()}-${attempt}.png`);
-      shot = await server.call({ cmd: 'screenshot', ...region, path, maxDimension }, 60_000);
+      shot = await server.call({
+        cmd: 'screenshot',
+        ...region,
+        path,
+        maxDimension,
+        grid: args.grid === true,
+        cursor: args.cursor === true,
+      }, 60_000);
       if (attachments === undefined) break;
       const data = await readFile(shot.path);
       try {
@@ -694,6 +703,16 @@ export function apply(ctx) {
         const lines = rows.map((row) => `${row.role} | ${row.name} | ${row.x},${row.y}`);
         return { text: `elements of ${window.process} "${window.title}": ${rows.length}\n${lines.join('\n')}` };
       }
+      case 'invoke': {
+        const target = windowArg(args);
+        const control = typeof args.filter === 'string' ? args.filter.trim() : '';
+        if (target === '') throw new Error('invoke requires window (title or process substring)');
+        if (control === '') throw new Error('invoke requires filter (control name or role substring)');
+        const result = await server.call({ cmd: 'invoke', window: target, filter: control }, 60_000);
+        const window = result.window ?? {};
+        const role = String(result.role ?? '').replace(/^ControlType\./u, '');
+        return { text: `invoked "${result.name}" (${role || 'control'}) via ${result.method} in ${window.process} "${window.title}"` };
+      }
       default:
         throw new Error(`unsupported window action: ${String(args.action)}`);
     }
@@ -733,6 +752,7 @@ export function apply(ctx) {
             break;
           case 'activate':
           case 'elements':
+          case 'invoke':
             line = (await runWindow(step)).text.split('\n')[0];
             break;
           case 'windows':
@@ -747,7 +767,14 @@ export function apply(ctx) {
           case 'screenshot': {
             await mkdir(SCREENSHOT_DIR, { recursive: true });
             const path = join(SCREENSHOT_DIR, `shot-${Date.now()}-seq${index}.png`);
-            const shot = await server.call({ cmd: 'screenshot', ...regionOf(step), path, maxDimension: 1600 }, 60_000);
+            const shot = await server.call({
+              cmd: 'screenshot',
+              ...regionOf(step),
+              path,
+              maxDimension: 1600,
+              grid: step.grid === true,
+              cursor: step.cursor === true,
+            }, 60_000);
             line = `screenshot ${shot.width}x${shot.height} -> ${shot.path}`;
             break;
           }
@@ -789,7 +816,7 @@ export function apply(ctx) {
   publish({
     name: 'desktop_screenshot',
     description:
-      'Capture the Windows desktop (the whole virtual screen or a region) and return the frame as an image so you can see the screen. Coordinates are screen pixels; omit x, y, width and height for the full virtual desktop. The frame is what Windows composes for the desktop, so a true exclusive-fullscreen game or a DRM-protected surface can appear black. The mouse pointer is not drawn. Use it before clicking or typing to locate targets, and after actions to confirm the result.',
+      'Capture the Windows desktop (the whole virtual screen or a region) and return the frame as an image so you can see the screen. Coordinates are screen pixels; omit x, y, width and height for the full virtual desktop. Set grid:true for labelled coordinate grid lines and cursor:true to stamp the current pointer. The frame is what Windows composes for the desktop, so a true exclusive-fullscreen game or a DRM-protected surface can appear black. Use it before clicking or typing to locate targets, and after actions to confirm the result.',
     parameters: SCREENSHOT_SCHEMA,
     output: SCREENSHOT_OUTPUT,
     timeoutMs: 60_000,
@@ -822,7 +849,7 @@ export function apply(ctx) {
   publish({
     name: 'desktop_window',
     description:
-      'Windows of the real desktop: action=list lists visible windows (hwnd, process, title, rectangle), action=activate brings one to the foreground, action=elements returns UI Automation controls (role, name, centre point) of a window without a screenshot. UI Automation only sees native controls; Chromium/Electron/Qt custom-drawn surfaces need desktop_find or desktop_screenshot.',
+      'Windows of the real desktop: action=list lists visible windows (hwnd, process, title, rectangle), action=activate brings one to the foreground, action=elements returns UI Automation controls (role, name, centre point) of a window without a screenshot, and action=invoke fires a control default action through UI Automation. UI Automation only sees native controls; Chromium/Electron/Qt custom-drawn surfaces need desktop_find or desktop_screenshot.',
     parameters: WINDOW_SCHEMA,
     output: TEXT_OUTPUT,
     timeoutMs: 90_000,

@@ -19,9 +19,9 @@
 | `desktop_mouse` | 移动、点击（左/右/中、单击/双击/连击）、拖拽、滚轮、按下/抬起 |
 | `desktop_keyboard` | 输入 Unicode 文本（中文、emoji、任意符号）、按快捷键、按住/松开按键 |
 | `desktop_state` | 光标位置、虚拟屏幕范围、前台窗口（进程/标题/矩形）、当前按住的键 |
-| `desktop_screenshot` | 截取整个虚拟桌面或指定区域，以图片形式返回给模型 |
+| `desktop_screenshot` | 截取整个虚拟桌面或指定区域，以图片形式返回给模型；可选叠加坐标网格和光标十字 |
 | `desktop_find` | 用 Windows 自带 OCR 在屏幕上找文字并返回精确坐标，`click:true` 可顺手点击——不产生图片、不消耗视觉 token |
-| `desktop_window` | 列出可见窗口、激活某个窗口，或读取 UIA 控件（角色/名称/中心坐标），不用截图 |
+| `desktop_window` | 列出可见窗口、激活某个窗口、读取 UIA 控件（角色/名称/中心坐标），或用 UIA InvokePattern 直接触发控件默认动作 |
 | `desktop_sequence` | 一次调用批量执行多个动作（点击、找字、等待、截图……） |
 
 这些 schema 在每个会话的每次请求里都会占用 token（不用也占），不需要时建议禁用。
@@ -32,7 +32,7 @@
 
 ### 窗口与 UI Automation
 
-`desktop_window` 可列窗口（hwnd/进程/标题/矩形）、激活窗口，或返回 `角色 | 名称 | x,y` 形式的 UIA 控件。原生控件效果好；Chromium/Electron/Qt 自绘界面只能拿到外壳，这类请用 `desktop_find` 或截图。
+`desktop_window` 可列窗口（hwnd/进程/标题/矩形）、激活窗口，或返回 `角色 | 名称 | x,y` 形式的 UIA 控件。`action=invoke` 用 UI Automation 的 InvokePattern（没有则退回 LegacyIAccessible）直接触发控件默认动作，不用移动鼠标，是点原生按钮最可靠的方式。UIA 原生的应用（WPF、UWP、资源管理器）效果好；Chromium/Electron/Qt 自绘界面只能拿到外壳，这类请用 `desktop_find` 或截图。
 
 ### 批量动作
 
@@ -77,7 +77,7 @@ bundle 按 profile 安装；源码安装会链接到 clone 目录，之后 `git 
 node scripts/selftest.mjs
 ```
 
-自测会短暂移动光标、按一次 F24、打开并关闭一个临时 WinForms 窗口（验证窗口枚举/激活/UIA/OCR）、截两张图，最后恢复光标位置；运行期间不要动鼠标。
+自测会短暂移动光标、按一次 F24、打开并关闭一个临时 WPF 窗口（验证窗口枚举/激活/UIA/InvokePattern/OCR）、截图（含网格和光标叠加），最后恢复光标位置；运行期间不要动鼠标。
 
 ## 使用示例
 
@@ -115,6 +115,7 @@ node scripts/selftest.mjs
 - 多屏和非 100% 缩放在设计上支持（虚拟桌面坐标 + per-monitor DPI 感知），但未实测，欢迎反馈。
 - `desktop_find` 依赖 Windows OCR：短词、生僻字可能漏检或错字（所以它会返回分数和最接近的行）。需要安装 OCR 语言包，Windows 10/11 通常随显示语言自带。
 - `desktop_window elements` 只能看到原生控件；Chromium/Electron/Qt 自绘界面只返回外壳（用 `desktop_find` 或截图）。
+- `desktop_window invoke` 需要控件暴露 InvokePattern：UIA 原生应用（WPF、UWP、资源管理器）一般都有；部分经典 Win32/MSAA 控件只会暴露成通用 Pane 而没有该能力，这时改用坐标点击。
 - 用 `PrintWindow` 抓窗口时，GPU 渲染的应用可能返回空白图；改用前台屏幕截图或先激活窗口。
 - `desktop_sequence` 的各步连续执行、不等界面动画；需要等的地方插一条 `{"action":"wait","waitMs":...}`。
 - 企业 AppLocker / ConstrainedLanguage 策略或安全软件可能拦截 PowerShell helper。
