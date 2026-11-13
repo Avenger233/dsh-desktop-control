@@ -1,0 +1,58 @@
+{
+  "name": "@avengers233/dsh-desktop-control",
+  "version": "1.1.1",
+  "description": "Windows desktop mouse, keyboard and screenshot control for DeepSeek Harness sessions: desktop_mouse, desktop_keyboard, desktop_state and desktop_screenshot tools.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Avenger233",
+  "homepage": "https://github.com/Avenger233/dsh-desktop-control#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Avenger233/dsh-desktop-control.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Avenger233/dsh-desktop-control/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "cordis",
+    "plugin",
+    "desktop",
+    "mouse",
+    "keyboard",
+    "screenshot",
+    "automation",
+    "windows",
+    "computer-use"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "selftest": "node scripts/selftest.mjs"
+  },
+  "exports": {
+    ".": "./index.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "helper.ps1",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md",
+    "README.zh-CN.md",
+    "LICENSE"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}
