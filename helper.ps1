@@ -7,7 +7,8 @@
 # setting can corrupt non-ASCII text (typed characters, window titles).
 #
 # Commands: ping, state, move, click, down, up, drag, scroll, key, keydown,
-# keyup, type, quit. See the switch in the main loop for fields.
+# keyup, type, screenshot, windows, activate, elements, ocr, sleep, quit.
+# See the switch in the main loop for fields.
 
 $ErrorActionPreference = 'Stop'
 
@@ -283,12 +284,138 @@ public static class DeskInput
     {
         if (ms > 0) Thread.Sleep(ms);
     }
+
+    // ------------------------------------------------------------ window APIs
+    [DllImport("user32.dll")]
+    static extern bool EnumWindows(EnumWindowsProc callback, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    static extern bool IsWindowVisible(IntPtr hWnd);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    static extern int GetWindowTextLength(IntPtr hWnd);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    static extern int GetClassName(IntPtr hWnd, StringBuilder text, int count);
+
+    [DllImport("user32.dll")]
+    static extern bool IsIconic(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+    [DllImport("user32.dll")]
+    static extern bool SetForegroundWindow(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
+
+    [DllImport("kernel32.dll")]
+    static extern uint GetCurrentThreadId();
+
+    [DllImport("user32.dll")]
+    static extern bool PrintWindow(IntPtr hWnd, IntPtr hdcBlt, uint nFlags);
+
+    [DllImport("user32.dll")]
+    static extern bool GetClientRect(IntPtr hWnd, out RECT rect);
+
+    public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
+    static string ProcessNameOf(uint pid)
+    {
+        if (pid == 0) return "";
+        try
+        {
+            using (Process p = Process.GetProcessById((int)pid)) return p.ProcessName;
+        }
+        catch (Exception) { return ""; }
+    }
+
+    static Dictionary<string, object> DescribeWindow(IntPtr hwnd)
+    {
+        Dictionary<string, object> info = new Dictionary<string, object>();
+        info["handle"] = hwnd.ToInt64();
+        StringBuilder title = new StringBuilder(1024);
+        GetWindowText(hwnd, title, title.Capacity);
+        info["title"] = title.ToString();
+        StringBuilder cls = new StringBuilder(256);
+        GetClassName(hwnd, cls, cls.Capacity);
+        info["class"] = cls.ToString();
+        uint pid = 0;
+        GetWindowThreadProcessId(hwnd, out pid);
+        info["pid"] = (long)pid;
+        info["process"] = ProcessNameOf(pid);
+        RECT rect;
+        if (GetWindowRect(hwnd, out rect)) info["bounds"] = new int[] { rect.Left, rect.Top, rect.Right - rect.Left, rect.Bottom - rect.Top };
+        else info["bounds"] = new int[] { 0, 0, 0, 0 };
+        info["minimized"] = IsIconic(hwnd);
+        return info;
+    }
+
+    public static List<Dictionary<string, object>> VisibleWindows()
+    {
+        List<Dictionary<string, object>> result = new List<Dictionary<string, object>>();
+        EnumWindows(delegate(IntPtr hwnd, IntPtr lParam)
+        {
+            if (!IsWindowVisible(hwnd)) return true;
+            if (GetWindowTextLength(hwnd) <= 0) return true;
+            Dictionary<string, object> info = DescribeWindow(hwnd);
+            int[] bounds = (int[])info["bounds"];
+            if (bounds[2] <= 0 || bounds[3] <= 0) return true;
+            string cls = (string)info["class"];
+            if (cls == "Progman" || cls == "WorkerW") return true;
+            result.Add(info);
+            return true;
+        }, IntPtr.Zero);
+        return result;
+    }
+
+    public static Dictionary<string, object> WindowInfo(long handle)
+    {
+        return DescribeWindow(new IntPtr(handle));
+    }
+
+    public static int[] WindowRect(long handle)
+    {
+        RECT rect;
+        if (GetWindowRect(new IntPtr(handle), out rect)) return new int[] { rect.Left, rect.Top, rect.Right - rect.Left, rect.Bottom - rect.Top };
+        return new int[] { 0, 0, 0, 0 };
+    }
+
+    public static bool PrintWindowTo(long handle, IntPtr hdc, uint flags)
+    {
+        return PrintWindow(new IntPtr(handle), hdc, flags);
+    }
+
+    public static bool ActivateWindow(long handle)
+    {
+        IntPtr hwnd = new IntPtr(handle);
+        if (IsIconic(hwnd)) ShowWindow(hwnd, 9);
+        bool ok = SetForegroundWindow(hwnd);
+        if (!ok)
+        {
+            uint ignored;
+            uint target = GetWindowThreadProcessId(hwnd, out ignored);
+            uint self = GetCurrentThreadId();
+            if (AttachThreadInput(self, target, true))
+            {
+                ShowWindow(hwnd, 5);
+                ok = SetForegroundWindow(hwnd);
+                AttachThreadInput(self, target, false);
+            }
+        }
+        return ok;
+    }
 }
 '@
 
 $script:dpiAware = $false
 try { $script:dpiAware = [DeskInput]::Init() } catch { $script:dpiAware = $false }
 $script:drawingLoaded = $false
+$script:uiaLoaded = $false
+$script:ocrLoaded = $false
+$script:asTaskGeneric = $null
+$script:ocrEngine = $null
 
 # ------------------------------------------------------------------ key names
 $script:VK = @{
@@ -370,6 +497,220 @@ function Clamp-Int($value, [int]$default, [int]$min, [int]$max) {
 function Get-Button([string]$value) {
     if ($value -eq 'right' -or $value -eq 'middle') { return $value }
     return 'left'
+}
+
+# ------------------------------------------------------- windows / UIA / OCR
+function Ensure-Drawing {
+    if (-not $script:drawingLoaded) {
+        Add-Type -AssemblyName System.Drawing
+        $script:drawingLoaded = $true
+    }
+}
+
+function Get-WindowHandle($query, $handle) {
+    $candidate = 0
+    if ($null -ne $handle) {
+        if ([int64]::TryParse([string]$handle, [ref]$candidate) -and $candidate -gt 0) { return [long]$candidate }
+    }
+    if ([string]::IsNullOrWhiteSpace([string]$query)) { throw 'provide a window title/process substring or an hwnd' }
+    $needle = ([string]$query).Trim().ToLowerInvariant()
+    foreach ($entry in [DeskInput]::VisibleWindows()) {
+        $title = ([string]$entry['title']).ToLowerInvariant()
+        $process = ([string]$entry['process']).ToLowerInvariant()
+        if (($title.Length -gt 0 -and $title.Contains($needle)) -or ($process.Length -gt 0 -and $process.Contains($needle))) {
+            return [long]$entry['handle']
+        }
+    }
+    throw "no visible window matches '$query'"
+}
+
+function Resize-Bitmap($bitmap, [double]$scale) {
+    $width = [int][Math]::Max(1, [Math]::Round($bitmap.Width * $scale))
+    $height = [int][Math]::Max(1, [Math]::Round($bitmap.Height * $scale))
+    $resized = New-Object System.Drawing.Bitmap -ArgumentList @($width, $height, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+    $graphics = [System.Drawing.Graphics]::FromImage($resized)
+    try {
+        $graphics.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+        $graphics.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality
+        $graphics.DrawImage($bitmap, 0, 0, $width, $height)
+    }
+    finally { $graphics.Dispose() }
+    return $resized
+}
+
+function Get-ScreenRegionBitmap([int]$left, [int]$top, [int]$width, [int]$height, [double]$scale) {
+    Ensure-Drawing
+    $native = New-Object System.Drawing.Bitmap -ArgumentList @($width, $height, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+    $graphics = [System.Drawing.Graphics]::FromImage($native)
+    try {
+        $size = New-Object System.Drawing.Size -ArgumentList @($width, $height)
+        $graphics.CopyFromScreen($left, $top, 0, 0, $size, [System.Drawing.CopyPixelOperation]::SourceCopy)
+    }
+    finally { $graphics.Dispose() }
+    if ($scale -eq 1.0) { return $native }
+    try { return (Resize-Bitmap $native $scale) }
+    finally { $native.Dispose() }
+}
+
+function Test-BitmapBlank($bitmap) {
+    $stepX = [int][Math]::Max(1, [Math]::Floor($bitmap.Width / 8.0))
+    $stepY = [int][Math]::Max(1, [Math]::Floor($bitmap.Height / 8.0))
+    $colored = 0
+    for ($y = 0; $y -lt $bitmap.Height; $y += $stepY) {
+        for ($x = 0; $x -lt $bitmap.Width; $x += $stepX) {
+            $pixel = $bitmap.GetPixel($x, $y)
+            if ($pixel.A -ne 0 -or $pixel.R -ne 0 -or $pixel.G -ne 0 -or $pixel.B -ne 0) {
+                $colored++
+                if ($colored -gt 3) { return $false }
+            }
+        }
+    }
+    return $true
+}
+
+function Get-WindowBitmap([long]$handle) {
+    Ensure-Drawing
+    $rect = [DeskInput]::WindowRect($handle)
+    if ($rect[2] -le 0 -or $rect[3] -le 0) { throw 'window has no visible area (minimized?)' }
+    $bitmap = New-Object System.Drawing.Bitmap -ArgumentList @($rect[2], $rect[3], [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+    $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+    $hdc = $graphics.GetHdc()
+    try { $ok = [DeskInput]::PrintWindowTo($handle, $hdc, 2) }
+    finally { [void]$graphics.ReleaseHdc($hdc); $graphics.Dispose() }
+    if (-not $ok) {
+        $bitmap.Dispose()
+        throw 'PrintWindow failed for this window; activate it and capture the screen instead'
+    }
+    if (Test-BitmapBlank $bitmap) {
+        $bitmap.Dispose()
+        throw 'the captured window is blank (the app does not support PrintWindow); activate it and capture the screen instead'
+    }
+    return $bitmap
+}
+
+function Ensure-Uia {
+    if ($script:uiaLoaded) { return }
+    Add-Type -AssemblyName UIAutomationClient
+    Add-Type -AssemblyName UIAutomationTypes
+    Add-Type -AssemblyName WindowsBase
+    $script:uiaLoaded = $true
+}
+
+function Get-UiaRows([long]$handle, [int]$maxDepth, [int]$maxNodes, [string]$filter) {
+    Ensure-Uia
+    $root = [System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]$handle)
+    if ($null -eq $root) { throw 'UI Automation could not attach to this window' }
+    $needle = ''
+    if (-not [string]::IsNullOrWhiteSpace($filter)) { $needle = $filter.Trim().ToLowerInvariant() }
+    $rows = New-Object System.Collections.ArrayList
+    $walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
+    $queue = New-Object System.Collections.Queue
+    $queue.Enqueue(@($root, 0))
+    while ($queue.Count -gt 0 -and $rows.Count -lt $maxNodes) {
+        $item = $queue.Dequeue()
+        $element = $item[0]
+        $depth = [int]$item[1]
+        if ($depth -gt 0) {
+            try {
+                $name = [string]$element.Current.Name
+                $border = $element.Current.BoundingRectangle
+                $role = [string]$element.Current.ControlType.ProgrammaticName
+                if ($role.StartsWith('ControlType.')) { $role = $role.Substring(12) }
+                if ($name.Length -gt 0 -and $border.Width -gt 0 -and $border.Height -gt 0) {
+                    if ($needle.Length -eq 0 -or $name.ToLowerInvariant().Contains($needle) -or $role.ToLowerInvariant().Contains($needle)) {
+                        [void]$rows.Add(@{
+                            role = $role
+                            name = $name
+                            x = [int][Math]::Round($border.X + $border.Width / 2)
+                            y = [int][Math]::Round($border.Y + $border.Height / 2)
+                            width = [int][Math]::Round($border.Width)
+                            height = [int][Math]::Round($border.Height)
+                            depth = $depth
+                        })
+                    }
+                }
+            }
+            catch { }
+        }
+        if ($depth -lt $maxDepth) {
+            try {
+                $child = $walker.GetFirstChild($element)
+                while ($null -ne $child) {
+                    $queue.Enqueue(@($child, ($depth + 1)))
+                    $child = $walker.GetNextSibling($child)
+                }
+            }
+            catch { }
+        }
+    }
+    return ,$rows.ToArray()
+}
+
+function Ensure-Ocr {
+    if ($script:ocrLoaded) { return }
+    Add-Type -AssemblyName System.Runtime.WindowsRuntime
+    Ensure-Drawing
+    $null = [Windows.Media.Ocr.OcrEngine, Windows.Foundation, ContentType = WindowsRuntime]
+    $null = [Windows.Media.Ocr.OcrResult, Windows.Foundation, ContentType = WindowsRuntime]
+    $null = [Windows.Graphics.Imaging.BitmapDecoder, Windows.Foundation, ContentType = WindowsRuntime]
+    $null = [Windows.Graphics.Imaging.SoftwareBitmap, Windows.Foundation, ContentType = WindowsRuntime]
+    $null = [Windows.Storage.Streams.IRandomAccessStream, Windows.Foundation, ContentType = WindowsRuntime]
+    foreach ($method in [System.WindowsRuntimeSystemExtensions].GetMethods()) {
+        if ($method.Name -ne 'AsTask') { continue }
+        $parameters = $method.GetParameters()
+        if ($parameters.Count -ne 1) { continue }
+        if ($parameters[0].ParameterType.Name -eq 'IAsyncOperation`1') { $script:asTaskGeneric = $method; break }
+    }
+    if ($null -eq $script:asTaskGeneric) { throw 'the Windows Runtime AsTask bridge is unavailable' }
+    $script:ocrEngine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages()
+    if ($null -eq $script:ocrEngine) {
+        foreach ($language in [Windows.Media.Ocr.OcrEngine]::AvailableRecognizerLanguages) {
+            $candidate = [Windows.Media.Ocr.OcrEngine]::TryCreateFromLanguage($language)
+            if ($null -ne $candidate) { $script:ocrEngine = $candidate; break }
+        }
+    }
+    if ($null -eq $script:ocrEngine) {
+        throw 'Windows OCR is not available; install an OCR language pack (Settings > Time & Language > Language > optional features) or use desktop_screenshot'
+    }
+    $script:ocrLoaded = $true
+}
+
+function Await-WinRtOperation($operation, $resultType) {
+    $task = $script:asTaskGeneric.MakeGenericMethod($resultType).Invoke($null, @($operation))
+    [void]$task.Wait(-1)
+    return $task.Result
+}
+
+function Invoke-OcrOnBitmap($bitmap) {
+    Ensure-Ocr
+    $stream = New-Object System.IO.MemoryStream
+    try {
+        $bitmap.Save($stream, [System.Drawing.Imaging.ImageFormat]::Png)
+        $stream.Position = 0
+        $randomAccess = [System.IO.WindowsRuntimeStreamExtensions]::AsRandomAccessStream($stream)
+        $decoder = Await-WinRtOperation ([Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($randomAccess)) ([Windows.Graphics.Imaging.BitmapDecoder])
+        $softwareBitmap = Await-WinRtOperation ($decoder.GetSoftwareBitmapAsync()) ([Windows.Graphics.Imaging.SoftwareBitmap])
+        $result = Await-WinRtOperation ($script:ocrEngine.RecognizeAsync($softwareBitmap)) ([Windows.Media.Ocr.OcrResult])
+        $rows = New-Object System.Collections.ArrayList
+        foreach ($line in $result.Lines) {
+            $minX = [double]::MaxValue
+            $minY = [double]::MaxValue
+            $maxX = [double]::MinValue
+            $maxY = [double]::MinValue
+            foreach ($word in $line.Words) {
+                $box = $word.BoundingRect
+                if ($box.Width -le 0 -or $box.Height -le 0) { continue }
+                if ($box.X -lt $minX) { $minX = $box.X }
+                if ($box.Y -lt $minY) { $minY = $box.Y }
+                if (($box.X + $box.Width) -gt $maxX) { $maxX = $box.X + $box.Width }
+                if (($box.Y + $box.Height) -gt $maxY) { $maxY = $box.Y + $box.Height }
+            }
+            if ($minX -eq [double]::MaxValue) { continue }
+            [void]$rows.Add(@{ text = [string]$line.Text; x = $minX; y = $minY; width = ($maxX - $minX); height = ($maxY - $minY) })
+        }
+        return ,$rows.ToArray()
+    }
+    finally { $stream.Dispose() }
 }
 
 function Write-Reply($payload) {
@@ -622,6 +963,103 @@ function Handle-Command($cmd) {
             $file = New-Object System.IO.FileInfo -ArgumentList @($path)
             return @{ ok = $true; path = $path; width = $width; height = $height; sourceWidth = $sourceWidth; sourceHeight = $sourceHeight; bytes = $file.Length; left = $left; top = $top }
         }
+        'windows' {
+            $needle = ''
+            if ($null -ne $cmd.filter) { $needle = ([string]$cmd.filter).Trim().ToLowerInvariant() }
+            $top = Clamp-Int $cmd.top 30 1 200
+            $all = [DeskInput]::VisibleWindows()
+            $list = New-Object System.Collections.ArrayList
+            foreach ($entry in $all) {
+                if ($needle.Length -gt 0) {
+                    $title = ([string]$entry['title']).ToLowerInvariant()
+                    $process = ([string]$entry['process']).ToLowerInvariant()
+                    if (-not ($title.Contains($needle) -or $process.Contains($needle))) { continue }
+                }
+                [void]$list.Add($entry)
+                if ($list.Count -ge $top) { break }
+            }
+            return @{ ok = $true; total = $all.Count; windows = @($list) }
+        }
+        'activate' {
+            $handle = Get-WindowHandle $cmd.window $cmd.hwnd
+            $activated = [DeskInput]::ActivateWindow($handle)
+            [DeskInput]::Sleep(180)
+            return @{ ok = $true; activated = $activated; window = [DeskInput]::WindowInfo($handle); foreground = [DeskInput]::Foreground() }
+        }
+        'elements' {
+            $handle = Get-WindowHandle $cmd.window $cmd.hwnd
+            $depth = Clamp-Int $cmd.depth 4 1 10
+            $max = Clamp-Int $cmd.max 120 1 500
+            $needle = ''
+            if ($null -ne $cmd.filter) { $needle = [string]$cmd.filter }
+            $rows = Get-UiaRows $handle $depth $max $needle
+            return @{ ok = $true; window = [DeskInput]::WindowInfo($handle); count = @($rows).Count; elements = @($rows) }
+        }
+        'ocr' {
+            $scaleValue = 2.0
+            if ($null -ne $cmd.scale) {
+                $parsed = 0.0
+                if ([double]::TryParse([string]$cmd.scale, [ref]$parsed)) { $scaleValue = $parsed }
+            }
+            if ($scaleValue -lt 0.5) { $scaleValue = 0.5 }
+            if ($scaleValue -gt 4.0) { $scaleValue = 4.0 }
+            $vs = [DeskInput]::VirtualScreen()
+            $left = $vs[0]
+            $top = $vs[1]
+            $width = $vs[2]
+            $height = $vs[3]
+            $capture = 'screen'
+            $bitmap = $null
+            if ($null -ne $cmd.window -and ([string]$cmd.window).Trim().Length -gt 0) {
+                $handle = Get-WindowHandle $cmd.window $null
+                $rect = [DeskInput]::WindowRect($handle)
+                $left = $rect[0]
+                $top = $rect[1]
+                $width = $rect[2]
+                $height = $rect[3]
+                $bitmap = Get-WindowBitmap $handle
+                if ($scaleValue -ne 1.0) {
+                    $resized = Resize-Bitmap $bitmap $scaleValue
+                    $bitmap.Dispose()
+                    $bitmap = $resized
+                }
+                $capture = 'window'
+            }
+            else {
+                if ($null -ne $cmd.x -and $null -ne $cmd.y) {
+                    $left = Clamp-Int $cmd.x $vs[0] -100000 100000
+                    $top = Clamp-Int $cmd.y $vs[1] -100000 100000
+                }
+                if ($null -ne $cmd.width) { $width = Clamp-Int $cmd.width $vs[2] 1 20000 }
+                if ($null -ne $cmd.height) { $height = Clamp-Int $cmd.height $vs[3] 1 20000 }
+                $right = [Math]::Min($left + $width, $vs[0] + $vs[2])
+                $bottom = [Math]::Min($top + $height, $vs[1] + $vs[3])
+                if ($left -lt $vs[0]) { $left = $vs[0] }
+                if ($top -lt $vs[1]) { $top = $vs[1] }
+                $width = $right - $left
+                $height = $bottom - $top
+                if ($width -le 0 -or $height -le 0) { throw 'the requested OCR region is outside the screen' }
+                $bitmap = Get-ScreenRegionBitmap $left $top $width $height $scaleValue
+            }
+            try { $lines = Invoke-OcrOnBitmap $bitmap }
+            finally { if ($null -ne $bitmap) { $bitmap.Dispose() } }
+            $mapped = New-Object System.Collections.ArrayList
+            foreach ($line in @($lines)) {
+                [void]$mapped.Add(@{
+                    text = [string]$line['text']
+                    x = [int][Math]::Round($left + ([double]$line['x']) / $scaleValue)
+                    y = [int][Math]::Round($top + ([double]$line['y']) / $scaleValue)
+                    width = [int][Math]::Round(([double]$line['width']) / $scaleValue)
+                    height = [int][Math]::Round(([double]$line['height']) / $scaleValue)
+                })
+            }
+            return @{ ok = $true; capture = $capture; left = $left; top = $top; width = $width; height = $height; scale = $scaleValue; lines = @($mapped) }
+        }
+        'sleep' {
+            $ms = Clamp-Int $cmd.ms 100 0 60000
+            [DeskInput]::Sleep($ms)
+            return @{ ok = $true; sleptMs = $ms }
+        }
         'quit' { return @{ ok = $true; goodbye = $true } }
         default { throw "unknown command: $action" }
     }
@@ -650,6 +1088,13 @@ while ($true) {
         if ([string]$cmd.cmd -eq 'quit') { break }
     }
     catch {
-        Write-Reply @{ ok = $false; id = $id; error = $_.Exception.Message }
+        $failure = $_
+        $message = $failure.Exception.Message
+        $inner = $failure.Exception
+        while ($null -ne $inner.InnerException) {
+            $inner = $inner.InnerException
+            if (-not [string]::IsNullOrWhiteSpace($inner.Message)) { $message = $inner.Message }
+        }
+        Write-Reply @{ ok = $false; id = $id; error = $message }
     }
 }

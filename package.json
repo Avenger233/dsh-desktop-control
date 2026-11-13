@@ -1,7 +1,7 @@
 {
   "name": "@avengers233/dsh-desktop-control",
-  "version": "1.1.1",
-  "description": "Windows desktop mouse, keyboard and screenshot control for DeepSeek Harness sessions: desktop_mouse, desktop_keyboard, desktop_state and desktop_screenshot tools.",
+  "version": "1.2.0",
+  "description": "Windows desktop mouse, keyboard, OCR text search, UI Automation and screenshot control for DeepSeek Harness sessions: desktop_mouse, desktop_keyboard, desktop_state, desktop_screenshot, desktop_find, desktop_window, desktop_sequence.",
   "type": "module",
   "license": "MIT",
   "author": "Avenger233",
@@ -27,7 +27,10 @@
     "screenshot",
     "automation",
     "windows",
-    "computer-use"
+    "computer-use",
+    "ocr",
+    "uia",
+    "ui-automation"
   ],
   "engines": {
     "node": ">=20"
@@ -48,7 +51,8 @@
     "icon.svg",
     "README.md",
     "README.zh-CN.md",
-    "LICENSE"
+    "LICENSE",
+    "scripts/selftest.mjs"
   ],
   "dsh": {
     "bundle": {

@@ -11,7 +11,7 @@
 
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -109,6 +109,38 @@ function check(name, ok, detail) {
   console.log(`  ${ok ? 'PASS' : 'FAIL'}  ${name}${detail === undefined ? '' : `  (${detail})`}`);
 }
 
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// A deterministic WinForms window for the windows / UIA / OCR checks.
+const FORM_SCRIPT = `
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+$form = New-Object System.Windows.Forms.Form
+$form.Text = 'DSH OCR Test Window'
+$form.Width = 760
+$form.Height = 440
+$form.StartPosition = 'Manual'
+$form.Left = 320
+$form.Top = 220
+$form.TopMost = $true
+$label = New-Object System.Windows.Forms.Label
+$label.Text = 'HELLO OCR 42 保存'
+$label.Font = New-Object System.Drawing.Font('Segoe UI', 28, [System.Drawing.FontStyle]::Bold)
+$label.AutoSize = $true
+$label.Left = 40
+$label.Top = 70
+$form.Controls.Add($label)
+$button = New-Object System.Windows.Forms.Button
+$button.Text = 'PUSH ME'
+$button.Font = New-Object System.Drawing.Font('Segoe UI', 18)
+$button.Left = 40
+$button.Top = 200
+$button.Width = 240
+$button.Height = 80
+$form.Controls.Add($button)
+[void]$form.ShowDialog()
+`;
+
 async function main() {
   await ready;
   const initial = await call({ cmd: 'state' });
@@ -135,6 +167,37 @@ async function main() {
   await call({ cmd: 'keyup', keys: ['f24'] });
   const released = await call({ cmd: 'state', keys: ['f24'] });
   check('keyboard down/up state', held.pressed?.f24 === true && released.pressed?.f24 === false, `down=${held.pressed?.f24}, up=${released.pressed?.f24}`);
+
+  // Windows / UIA / OCR against a deterministic window opened by the test.
+  const formDir = await mkdtemp(join(tmpdir(), 'dsh-desktop-control-form-'));
+  const formPath = join(formDir, 'testform.ps1');
+  await writeFile(formPath, `\ufeff${FORM_SCRIPT}`, 'utf8');
+  const form = spawn(powershellPath(), ['-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass', '-File', formPath], { stdio: 'ignore' });
+  try {
+    let target;
+    for (let attempt = 0; attempt < 40 && target === undefined; attempt++) {
+      await delay(200);
+      const listing = await call({ cmd: 'windows', filter: 'DSH OCR Test Window', top: 5 });
+      const windows = Array.isArray(listing.windows) ? listing.windows : [];
+      if (windows.length > 0) target = windows[0];
+    }
+    check('windows: test window appears', target !== undefined, target === undefined ? 'not found' : `hwnd=${target.handle}`);
+    if (target !== undefined) {
+      const activated = await call({ cmd: 'activate', window: 'DSH OCR Test Window' });
+      check('activate: foreground matches', String(activated.foreground?.title ?? '').includes('DSH OCR Test Window'), activated.foreground?.title);
+      await delay(400);
+      const elements = await call({ cmd: 'elements', window: 'DSH OCR Test Window', depth: 5, max: 60 });
+      const names = (elements.elements ?? []).map((row) => row.name);
+      check('elements: UIA label and button', names.includes('HELLO OCR 42 保存') && names.includes('PUSH ME'), names.slice(0, 6).join(' | '));
+      const ocr = await call({ cmd: 'ocr', window: 'DSH OCR Test Window' });
+      const ocrTexts = (ocr.lines ?? []).map((line) => line.text);
+      const hit = ocrTexts.some((text) => text.toUpperCase().includes('HELLO') || text.includes('保存') || text.includes('亻'));
+      check('ocr: reads the label text', hit, JSON.stringify(ocrTexts));
+    }
+  } finally {
+    try { form.kill(); } catch { /* already gone */ }
+    await rm(formDir, { recursive: true, force: true });
+  }
 
   const dir = await mkdtemp(join(tmpdir(), 'dsh-desktop-control-selftest-'));
   try {

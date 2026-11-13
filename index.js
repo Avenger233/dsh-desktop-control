@@ -315,6 +315,126 @@ const SCREENSHOT_SCHEMA = {
   },
 };
 
+const FIND_SCHEMA = {
+  type: 'object',
+  properties: {
+    text: { type: 'string', description: 'Text to locate on screen. Matching ignores spaces and case; OCR misreads are handled with fuzzy scoring. Required.' },
+    window: { type: 'string', description: 'Restrict the capture to a window: title or process substring. Omit to capture the screen (optionally a region).' },
+    click: { type: 'boolean', description: 'Click the best match after locating it; defaults to false.' },
+    button: { type: 'string', enum: ['left', 'right', 'middle'], description: 'Mouse button for click; defaults to left.' },
+    threshold: { type: 'number', description: 'Minimum score from 0 to 1; defaults to 0.6. Lower it when OCR misreads characters.' },
+    x: { type: 'number', description: 'Optional screen region left edge (ignored when window is set).' },
+    y: { type: 'number', description: 'Optional screen region top edge.' },
+    width: { type: 'number', description: 'Optional screen region width.' },
+    height: { type: 'number', description: 'Optional screen region height.' },
+  },
+  required: ['text'],
+};
+
+const WINDOW_SCHEMA = {
+  type: 'object',
+  properties: {
+    action: {
+      type: 'string',
+      enum: ['list', 'activate', 'elements'],
+      description: 'list: visible windows with ids, process names and rectangles. activate: bring a window to the foreground. elements: UI Automation controls (role, name, centre point) of a window, no image needed.',
+    },
+    window: { type: 'string', description: 'Window title or process name substring. Required for activate and elements.' },
+    filter: { type: 'string', description: 'list: keep windows whose title or process contains this text. elements: keep controls whose name or role contains this text.' },
+    top: { type: 'integer', description: 'list: maximum rows; defaults to 30.' },
+    depth: { type: 'integer', description: 'elements: UI Automation tree depth; defaults to 4 (max 10).' },
+    max: { type: 'integer', description: 'elements: maximum rows; defaults to 120 (max 500).' },
+  },
+  required: ['action'],
+};
+
+const SEQUENCE_SCHEMA = {
+  type: 'object',
+  properties: {
+    steps: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: true,
+        properties: {
+          action: {
+            type: 'string',
+            enum: ['move', 'click', 'drag', 'scroll', 'mouse_down', 'mouse_up', 'type', 'press', 'key_down', 'key_up', 'find', 'activate', 'windows', 'elements', 'wait', 'screenshot'],
+            description: 'Action for this step; the remaining fields are the same as the matching desktop_* tool.',
+          },
+          waitMs: { type: 'number', description: 'wait: milliseconds to pause; defaults to 300.' },
+          text: { type: 'string', description: 'type/find: text to type or locate.' },
+          x: { type: 'number' },
+          y: { type: 'number' },
+          toX: { type: 'number' },
+          toY: { type: 'number' },
+          width: { type: 'number' },
+          height: { type: 'number' },
+          button: { type: 'string', enum: ['left', 'right', 'middle'] },
+          count: { type: 'integer' },
+          delta: { type: 'number' },
+          durationMs: { type: 'number' },
+          keys: { type: 'array', items: { type: 'string' } },
+          charDelayMs: { type: 'number' },
+          holdMs: { type: 'number' },
+          window: { type: 'string' },
+          filter: { type: 'string' },
+          click: { type: 'boolean' },
+          threshold: { type: 'number' },
+          depth: { type: 'integer' },
+          top: { type: 'integer' },
+          max: { type: 'integer' },
+        },
+        required: ['action'],
+      },
+      description: 'Ordered steps, at most 30. Each step is one action of the desktop_* tools; a failing step stops the sequence. screenshot steps save a PNG and return its path (no image).',
+    },
+  },
+  required: ['steps'],
+};
+
+// ---------------------------------------------------------------- OCR matching
+function normalizeForMatch(value) {
+  return String(value ?? '').toLowerCase().replace(/\s+/gu, '');
+}
+
+function charOverlap(query, candidate) {
+  if (query === '') return 0;
+  const counts = new Map();
+  for (const ch of candidate) counts.set(ch, (counts.get(ch) ?? 0) + 1);
+  let hits = 0;
+  for (const ch of query) {
+    const remaining = counts.get(ch) ?? 0;
+    if (remaining > 0) {
+      counts.set(ch, remaining - 1);
+      hits += 1;
+    }
+  }
+  return hits / [...query].length;
+}
+
+function scoreOcrLine(query, text) {
+  const candidate = normalizeForMatch(text);
+  if (candidate === query) return 1;
+  if (candidate.length > 0 && candidate.includes(query)) return 0.92;
+  // Only let a shorter OCR line explain a longer query when it covers a real
+  // share of it; otherwise "ZZZZQQQ" would "match" a stray "QQ".
+  const reverseFloor = Math.max(2, Math.ceil([...query].length * 0.6));
+  if ([...candidate].length >= reverseFloor && query.includes(candidate)) return 0.78;
+  return Math.min(0.7, charOverlap(query, candidate) * 0.7);
+}
+
+function rankOcrLines(lines, text) {
+  const query = normalizeForMatch(text);
+  const scored = [];
+  for (const line of lines) {
+    const score = scoreOcrLine(query, line.text);
+    if (score > 0) scored.push({ ...line, score });
+  }
+  scored.sort((left, right) => right.score - left.score || left.y - right.y || left.x - right.x);
+  return scored;
+}
+
 function requireKeys(keys) {
   if (!Array.isArray(keys) || keys.length === 0) throw new Error('keys is required for this action');
   return keys.map((key) => String(key));
@@ -333,6 +453,317 @@ export function apply(ctx) {
   ctx.effect(() => () => server.dispose(), 'desktop-control: input helper process');
   const publish = (definition, label) => ctx.effect(() => ctx.tools.register(definition), label);
 
+  // ---------------------------------------------------------------- runners
+  function regionOf(args) {
+    const region = {};
+    if (args.x !== undefined) region.x = pixel(args.x, 'x');
+    if (args.y !== undefined) region.y = pixel(args.y, 'y');
+    if (args.width !== undefined) region.width = pixel(args.width, 'width');
+    if (args.height !== undefined) region.height = pixel(args.height, 'height');
+    return region;
+  }
+
+  function windowArg(args) {
+    return typeof args.window === 'string' && args.window.trim() !== '' ? args.window.trim() : '';
+  }
+
+  async function runMouse(args) {
+    switch (args.action) {
+      case 'move': {
+        if (args.x === undefined || args.y === undefined) throw new Error('move requires x and y');
+        const result = await server.call({
+          cmd: 'move',
+          x: pixel(args.x, 'x'),
+          y: pixel(args.y, 'y'),
+          durationMs: clampInt(args.durationMs, 0, 0, 15_000),
+        });
+        return { text: `cursor moved to (${result.x}, ${result.y})` };
+      }
+      case 'click': {
+        const command = {
+          cmd: 'click',
+          button: args.button ?? 'left',
+          count: clampInt(args.count, 1, 1, 10),
+        };
+        if (args.x !== undefined || args.y !== undefined) {
+          if (args.x === undefined || args.y === undefined) throw new Error('click needs both x and y, or neither');
+          command.x = pixel(args.x, 'x');
+          command.y = pixel(args.y, 'y');
+        }
+        const result = await server.call(command);
+        const times = result.count === 1 ? 'once' : `${result.count} times`;
+        const at = args.x === undefined ? '' : ` at (${result.x}, ${result.y})`;
+        return { text: `clicked ${result.button} button ${times}${at}` };
+      }
+      case 'drag': {
+        if (args.x === undefined || args.y === undefined || args.toX === undefined || args.toY === undefined) {
+          throw new Error('drag requires x, y, toX and toY');
+        }
+        const result = await server.call({
+          cmd: 'drag',
+          x: pixel(args.x, 'x'),
+          y: pixel(args.y, 'y'),
+          toX: pixel(args.toX, 'toX'),
+          toY: pixel(args.toY, 'toY'),
+          button: args.button ?? 'left',
+          durationMs: clampInt(args.durationMs, 400, 50, 15_000),
+        });
+        return { text: `dragged ${result.button} button from (${args.x}, ${args.y}) to (${result.x}, ${result.y})` };
+      }
+      case 'scroll': {
+        if (args.delta === undefined) throw new Error('scroll requires delta');
+        const command = { cmd: 'scroll', delta: clampInt(args.delta, 0, -12_000, 12_000), horizontal: args.horizontal === true };
+        if (args.x !== undefined || args.y !== undefined) {
+          if (args.x === undefined || args.y === undefined) throw new Error('scroll needs both x and y, or neither');
+          command.x = pixel(args.x, 'x');
+          command.y = pixel(args.y, 'y');
+        }
+        const result = await server.call(command);
+        const notches = Math.abs(result.delta) / 120;
+        return { text: `scrolled ${notches} notch${notches === 1 ? '' : 'es'} ${result.delta < 0 ? 'down' : 'up'}${result.horizontal ? ' horizontally' : ''} at (${result.x}, ${result.y})` };
+      }
+      case 'down':
+      case 'up': {
+        const result = await server.call({ cmd: args.action, button: args.button ?? 'left' });
+        return { text: `${result.button} button ${args.action === 'down' ? 'held down' : 'released'} at (${result.x}, ${result.y})` };
+      }
+      default:
+        throw new Error(`unsupported mouse action: ${String(args.action)}`);
+    }
+  }
+
+  async function runKeyboard(args) {
+    switch (args.action) {
+      case 'type': {
+        if (typeof args.text !== 'string' || args.text === '') throw new Error('type requires text');
+        if (args.text.length > 20_000) throw new Error('text is limited to 20000 characters per call');
+        const result = await server.call({
+          cmd: 'type',
+          text: args.text,
+          charDelayMs: clampInt(args.charDelayMs, 12, 0, 500),
+        }, 120_000);
+        return { text: `typed ${result.chars} characters` };
+      }
+      case 'press': {
+        const keys = requireKeys(args.keys);
+        const result = await server.call({
+          cmd: 'key',
+          keys,
+          holdMs: clampInt(args.holdMs, 40, 10, 5_000),
+        });
+        return { text: `pressed ${result.keys.join('+')}` };
+      }
+      case 'down':
+      case 'up': {
+        const keys = requireKeys(args.keys);
+        await server.call({ cmd: args.action === 'down' ? 'keydown' : 'keyup', keys });
+        return { text: args.action === 'down' ? `keys held down: ${keys.join(', ')}` : `keys released: ${keys.join(', ')}` };
+      }
+      default:
+        throw new Error(`unsupported keyboard action: ${String(args.action)}`);
+    }
+  }
+
+  async function runScreenshot(args) {
+    const region = regionOf(args);
+    const attachments = ctx.get('attachments');
+    const limits = attachments?.imageLimits;
+    let maxDimension = Math.min(Number(limits?.maxImageDimension) || SCREENSHOT_MAX_DIMENSION, SCREENSHOT_MAX_DIMENSION);
+    await pruneScreenshots();
+    await mkdir(SCREENSHOT_DIR, { recursive: true });
+    let shot;
+    let image;
+    for (let attempt = 0; ; attempt++) {
+      const path = join(SCREENSHOT_DIR, `shot-${Date.now()}-${attempt}.png`);
+      shot = await server.call({ cmd: 'screenshot', ...region, path, maxDimension }, 60_000);
+      if (attachments === undefined) break;
+      const data = await readFile(shot.path);
+      try {
+        const ref = await attachments.saveImage({ data, mediaType: 'image/png', name: 'desktop screenshot' });
+        image = {
+          attachmentId: String(ref.attachmentId),
+          mediaType: ref.mediaType,
+          bytes: ref.bytes,
+          width: ref.width,
+          height: ref.height,
+        };
+        break;
+      } catch (error) {
+        if (attempt >= 2) throw error;
+        maxDimension = Math.max(480, Math.round(maxDimension / 2));
+      }
+    }
+    const source = `${shot.sourceWidth}x${shot.sourceHeight}`;
+    const scaled = image !== undefined && (image.width !== shot.sourceWidth || image.height !== shot.sourceHeight)
+      ? `, stored ${image.width}x${image.height}`
+      : '';
+    const fallback = image === undefined ? `\nfile: ${shot.path}\nCall read_image on this path to view the frame.` : '';
+    return {
+      text: `screenshot ${source} at (${shot.left}, ${shot.top})${scaled}${fallback}`,
+      ...(image === undefined ? {} : { image }),
+    };
+  }
+
+  async function runState(args) {
+    const keys = Array.isArray(args.keys) ? args.keys.map((key) => String(key)) : [];
+    const state = await server.call({ cmd: 'state', keys });
+    const screen = state.screen ?? {};
+    const foreground = state.foreground ?? {};
+    const bounds = Array.isArray(foreground.bounds) ? foreground.bounds : undefined;
+    const lines = [
+      `cursor: (${state.x}, ${state.y})`,
+      `screen: ${screen.width}x${screen.height} at (${screen.left}, ${screen.top})`,
+      `foreground: ${foreground.process || 'unknown'}${foreground.pid ? ` (pid ${foreground.pid})` : ''}${foreground.title ? ` "${foreground.title}"` : ''}${bounds ? ` at (${bounds[0]}, ${bounds[1]}) ${bounds[2]}x${bounds[3]}` : ''}`,
+    ];
+    if (keys.length > 0) {
+      const pressed = state.pressed ?? {};
+      lines.push(`keys: ${keys.map((key) => `${key}=${pressed[key] === null ? 'unknown' : pressed[key] === true ? 'down' : 'up'}`).join(', ')}`);
+    }
+    return { text: lines.join('\n') };
+  }
+
+  async function runFind(args) {
+    if (typeof args.text !== 'string' || args.text.trim() === '') throw new Error('text is required');
+    const command = { cmd: 'ocr' };
+    const target = windowArg(args);
+    if (target !== '') command.window = target;
+    else Object.assign(command, regionOf(args));
+    const scale = Number(args.scale);
+    if (Number.isFinite(scale)) command.scale = Math.min(4, Math.max(0.5, scale));
+    const result = await server.call(command, 90_000);
+    const lines = Array.isArray(result.lines) ? result.lines : [];
+    let threshold = 0.6;
+    const requested = Number(args.threshold);
+    if (Number.isFinite(requested)) threshold = Math.min(1, Math.max(0, requested));
+    const ranked = rankOcrLines(lines, args.text);
+    const matches = ranked.filter((line) => line.score >= threshold);
+    const header = `find ${JSON.stringify(args.text)} | capture=${result.capture} ${result.width}x${result.height} at (${result.left}, ${result.top}) | ${lines.length} lines | matches=${matches.length}`;
+    if (matches.length === 0) {
+      const closest = ranked.slice(0, 3).map((line) => `${line.x},${line.y} score=${line.score.toFixed(2)} ${JSON.stringify(line.text)}`);
+      const suggestions = closest.length === 0 ? '' : `\nclosest:\n${closest.join('\n')}`;
+      return { text: `${header}\nnothing matched; try another word or lower threshold${suggestions}` };
+    }
+    const best = matches[0];
+    const shown = matches.slice(0, 5).map((line) => `${line.x},${line.y} score=${line.score.toFixed(2)} ${JSON.stringify(line.text)}`).join('\n');
+    if (args.click === true) {
+      const button = args.button ?? 'left';
+      await server.call({ cmd: 'click', x: best.x, y: best.y, button });
+      return { text: `${header}\n${shown}\nclicked ${button} at (${best.x}, ${best.y})` };
+    }
+    return { text: `${header}\n${shown}` };
+  }
+
+  async function runWindow(args) {
+    switch (args.action) {
+      case 'list': {
+        const command = { cmd: 'windows', top: clampInt(args.top, 30, 1, 200) };
+        const filter = typeof args.filter === 'string' && args.filter.trim() !== '' ? args.filter.trim() : '';
+        if (filter !== '') command.filter = filter;
+        const result = await server.call(command);
+        const windows = Array.isArray(result.windows) ? result.windows : [];
+        const lines = windows.map((w) => `${w.handle} ${w.pid} ${w.process} | ${w.title} | ${w.bounds.join(',')}${w.minimized ? ' (minimized)' : ''}`);
+        return { text: `windows: ${windows.length} shown of ${result.total}\n${lines.join('\n')}` };
+      }
+      case 'activate': {
+        const target = windowArg(args);
+        if (target === '') throw new Error('activate requires window (title or process substring)');
+        const result = await server.call({ cmd: 'activate', window: target });
+        const window = result.window ?? {};
+        const foreground = result.foreground ?? {};
+        const bounds = Array.isArray(window.bounds) ? window.bounds : [0, 0, 0, 0];
+        const lines = [
+          `activated ${result.activated ? 'yes' : 'no'}: ${window.process} "${window.title}" at (${bounds[0]}, ${bounds[1]}) ${bounds[2]}x${bounds[3]}`,
+          `foreground: ${foreground.process} "${foreground.title}"`,
+        ];
+        return { text: lines.join('\n') };
+      }
+      case 'elements': {
+        const target = windowArg(args);
+        if (target === '') throw new Error('elements requires window (title or process substring)');
+        const command = {
+          cmd: 'elements',
+          window: target,
+          depth: clampInt(args.depth, 4, 1, 10),
+          max: clampInt(args.max, 120, 1, 500),
+        };
+        const filter = typeof args.filter === 'string' && args.filter.trim() !== '' ? args.filter.trim() : '';
+        if (filter !== '') command.filter = filter;
+        const result = await server.call(command, 60_000);
+        const rows = Array.isArray(result.elements) ? result.elements : [];
+        const window = result.window ?? {};
+        const lines = rows.map((row) => `${row.role} | ${row.name} | ${row.x},${row.y}`);
+        return { text: `elements of ${window.process} "${window.title}": ${rows.length}\n${lines.join('\n')}` };
+      }
+      default:
+        throw new Error(`unsupported window action: ${String(args.action)}`);
+    }
+  }
+
+  async function runSequence(args) {
+    const steps = Array.isArray(args.steps) ? args.steps : [];
+    if (steps.length === 0) throw new Error('steps is required');
+    if (steps.length > 30) throw new Error('a sequence is limited to 30 steps');
+    const results = [];
+    for (let index = 0; index < steps.length; index++) {
+      const step = steps[index] !== null && typeof steps[index] === 'object' ? steps[index] : {};
+      const action = typeof step.action === 'string' ? step.action : '';
+      try {
+        let line;
+        switch (action) {
+          case 'move':
+          case 'click':
+          case 'drag':
+          case 'scroll':
+            line = (await runMouse(step)).text.split('\n')[0];
+            break;
+          case 'mouse_down':
+          case 'mouse_up':
+            line = (await runMouse({ ...step, action: action === 'mouse_down' ? 'down' : 'up' })).text.split('\n')[0];
+            break;
+          case 'type':
+          case 'press':
+            line = (await runKeyboard(step)).text.split('\n')[0];
+            break;
+          case 'key_down':
+          case 'key_up':
+            line = (await runKeyboard({ ...step, action: action === 'key_down' ? 'down' : 'up' })).text.split('\n')[0];
+            break;
+          case 'find':
+            line = (await runFind(step)).text.split('\n')[0];
+            break;
+          case 'activate':
+          case 'elements':
+            line = (await runWindow(step)).text.split('\n')[0];
+            break;
+          case 'windows':
+            line = (await runWindow({ ...step, action: 'list' })).text.split('\n')[0];
+            break;
+          case 'wait': {
+            const ms = clampInt(step.waitMs ?? step.ms, 300, 0, 30_000);
+            await server.call({ cmd: 'sleep', ms });
+            line = `waited ${ms}ms`;
+            break;
+          }
+          case 'screenshot': {
+            await mkdir(SCREENSHOT_DIR, { recursive: true });
+            const path = join(SCREENSHOT_DIR, `shot-${Date.now()}-seq${index}.png`);
+            const shot = await server.call({ cmd: 'screenshot', ...regionOf(step), path, maxDimension: 1600 }, 60_000);
+            line = `screenshot ${shot.width}x${shot.height} -> ${shot.path}`;
+            break;
+          }
+          default:
+            throw new Error(`unknown action "${action}"`);
+        }
+        results.push(`${index + 1}. ${action}: ${line}`);
+      } catch (error) {
+        const completed = results.length === 0 ? '(none)' : `\n${results.join('\n')}`;
+        throw new Error(`step ${index + 1} (${action || 'unknown'}) failed: ${error instanceof Error ? error.message : String(error)}\ncompleted:${completed}`);
+      }
+    }
+    await pruneScreenshots();
+    return { text: `sequence: ${steps.length} steps\n${results.join('\n')}` };
+  }
+
   publish({
     name: 'desktop_mouse',
     description:
@@ -341,70 +772,7 @@ export function apply(ctx) {
     output: TEXT_OUTPUT,
     timeoutMs: 90_000,
     isConcurrencySafe: () => false,
-    execute: async (args) => {
-      switch (args.action) {
-        case 'move': {
-          if (args.x === undefined || args.y === undefined) throw new Error('move requires x and y');
-          const result = await server.call({
-            cmd: 'move',
-            x: pixel(args.x, 'x'),
-            y: pixel(args.y, 'y'),
-            durationMs: clampInt(args.durationMs, 0, 0, 15_000),
-          });
-          return { text: `cursor moved to (${result.x}, ${result.y})` };
-        }
-        case 'click': {
-          const command = {
-            cmd: 'click',
-            button: args.button ?? 'left',
-            count: clampInt(args.count, 1, 1, 10),
-          };
-          if (args.x !== undefined || args.y !== undefined) {
-            if (args.x === undefined || args.y === undefined) throw new Error('click needs both x and y, or neither');
-            command.x = pixel(args.x, 'x');
-            command.y = pixel(args.y, 'y');
-          }
-          const result = await server.call(command);
-          const times = result.count === 1 ? 'once' : `${result.count} times`;
-          const at = args.x === undefined ? '' : ` at (${result.x}, ${result.y})`;
-          return { text: `clicked ${result.button} button ${times}${at}` };
-        }
-        case 'drag': {
-          if (args.x === undefined || args.y === undefined || args.toX === undefined || args.toY === undefined) {
-            throw new Error('drag requires x, y, toX and toY');
-          }
-          const result = await server.call({
-            cmd: 'drag',
-            x: pixel(args.x, 'x'),
-            y: pixel(args.y, 'y'),
-            toX: pixel(args.toX, 'toX'),
-            toY: pixel(args.toY, 'toY'),
-            button: args.button ?? 'left',
-            durationMs: clampInt(args.durationMs, 400, 50, 15_000),
-          });
-          return { text: `dragged ${result.button} button from (${args.x}, ${args.y}) to (${result.x}, ${result.y})` };
-        }
-        case 'scroll': {
-          if (args.delta === undefined) throw new Error('scroll requires delta');
-          const command = { cmd: 'scroll', delta: clampInt(args.delta, 0, -12_000, 12_000), horizontal: args.horizontal === true };
-          if (args.x !== undefined || args.y !== undefined) {
-            if (args.x === undefined || args.y === undefined) throw new Error('scroll needs both x and y, or neither');
-            command.x = pixel(args.x, 'x');
-            command.y = pixel(args.y, 'y');
-          }
-          const result = await server.call(command);
-          const notches = Math.abs(result.delta) / 120;
-          return { text: `scrolled ${notches} notch${notches === 1 ? '' : 'es'} ${result.delta < 0 ? 'down' : 'up'}${result.horizontal ? ' horizontally' : ''} at (${result.x}, ${result.y})` };
-        }
-        case 'down':
-        case 'up': {
-          const result = await server.call({ cmd: args.action, button: args.button ?? 'left' });
-          return { text: `${result.button} button ${args.action === 'down' ? 'held down' : 'released'} at (${result.x}, ${result.y})` };
-        }
-        default:
-          throw new Error(`unsupported mouse action: ${String(args.action)}`);
-      }
-    },
+    execute: (args) => runMouse(args),
   }, 'desktop-control: desktop_mouse');
 
   publish({
@@ -415,37 +783,7 @@ export function apply(ctx) {
     output: TEXT_OUTPUT,
     timeoutMs: 120_000,
     isConcurrencySafe: () => false,
-    execute: async (args) => {
-      switch (args.action) {
-        case 'type': {
-          if (typeof args.text !== 'string' || args.text === '') throw new Error('type requires text');
-          if (args.text.length > 20_000) throw new Error('text is limited to 20000 characters per call');
-          const result = await server.call({
-            cmd: 'type',
-            text: args.text,
-            charDelayMs: clampInt(args.charDelayMs, 12, 0, 500),
-          }, 120_000);
-          return { text: `typed ${result.chars} characters` };
-        }
-        case 'press': {
-          const keys = requireKeys(args.keys);
-          const result = await server.call({
-            cmd: 'key',
-            keys,
-            holdMs: clampInt(args.holdMs, 40, 10, 5_000),
-          });
-          return { text: `pressed ${result.keys.join('+')}` };
-        }
-        case 'down':
-        case 'up': {
-          const keys = requireKeys(args.keys);
-          await server.call({ cmd: args.action === 'down' ? 'keydown' : 'keyup', keys });
-          return { text: args.action === 'down' ? `keys held down: ${keys.join(', ')}` : `keys released: ${keys.join(', ')}` };
-        }
-        default:
-          throw new Error(`unsupported keyboard action: ${String(args.action)}`);
-      }
-    },
+    execute: (args) => runKeyboard(args),
   }, 'desktop-control: desktop_keyboard');
 
   publish({
@@ -456,49 +794,7 @@ export function apply(ctx) {
     output: SCREENSHOT_OUTPUT,
     timeoutMs: 60_000,
     isConcurrencySafe: () => true,
-    execute: async (args) => {
-      const region = {};
-      if (args.x !== undefined) region.x = pixel(args.x, 'x');
-      if (args.y !== undefined) region.y = pixel(args.y, 'y');
-      if (args.width !== undefined) region.width = pixel(args.width, 'width');
-      if (args.height !== undefined) region.height = pixel(args.height, 'height');
-      const attachments = ctx.get('attachments');
-      const limits = attachments?.imageLimits;
-      let maxDimension = Math.min(Number(limits?.maxImageDimension) || SCREENSHOT_MAX_DIMENSION, SCREENSHOT_MAX_DIMENSION);
-      await pruneScreenshots();
-      await mkdir(SCREENSHOT_DIR, { recursive: true });
-      let shot;
-      let image;
-      for (let attempt = 0; ; attempt++) {
-        const path = join(SCREENSHOT_DIR, `shot-${Date.now()}-${attempt}.png`);
-        shot = await server.call({ cmd: 'screenshot', ...region, path, maxDimension }, 60_000);
-        if (attachments === undefined) break;
-        const data = await readFile(shot.path);
-        try {
-          const ref = await attachments.saveImage({ data, mediaType: 'image/png', name: 'desktop screenshot' });
-          image = {
-            attachmentId: String(ref.attachmentId),
-            mediaType: ref.mediaType,
-            bytes: ref.bytes,
-            width: ref.width,
-            height: ref.height,
-          };
-          break;
-        } catch (error) {
-          if (attempt >= 2) throw error;
-          maxDimension = Math.max(480, Math.round(maxDimension / 2));
-        }
-      }
-      const source = `${shot.sourceWidth}x${shot.sourceHeight}`;
-      const scaled = image !== undefined && (image.width !== shot.sourceWidth || image.height !== shot.sourceHeight)
-        ? `, stored ${image.width}x${image.height}`
-        : '';
-      const fallback = image === undefined ? `\nfile: ${shot.path}\nCall read_image on this path to view the frame.` : '';
-      return {
-        text: `screenshot ${source} at (${shot.left}, ${shot.top})${scaled}${fallback}`,
-        ...(image === undefined ? {} : { image }),
-      };
-    },
+    execute: (args) => runScreenshot(args),
   }, 'desktop-control: desktop_screenshot');
 
   publish({
@@ -509,22 +805,39 @@ export function apply(ctx) {
     output: TEXT_OUTPUT,
     timeoutMs: 30_000,
     isConcurrencySafe: () => true,
-    execute: async (args) => {
-      const keys = Array.isArray(args.keys) ? args.keys.map((key) => String(key)) : [];
-      const state = await server.call({ cmd: 'state', keys });
-      const screen = state.screen ?? {};
-      const foreground = state.foreground ?? {};
-      const bounds = Array.isArray(foreground.bounds) ? foreground.bounds : undefined;
-      const lines = [
-        `cursor: (${state.x}, ${state.y})`,
-        `screen: ${screen.width}x${screen.height} at (${screen.left}, ${screen.top})`,
-        `foreground: ${foreground.process || 'unknown'}${foreground.pid ? ` (pid ${foreground.pid})` : ''}${foreground.title ? ` "${foreground.title}"` : ''}${bounds ? ` at (${bounds[0]}, ${bounds[1]}) ${bounds[2]}x${bounds[3]}` : ''}`,
-      ];
-      if (keys.length > 0) {
-        const pressed = state.pressed ?? {};
-        lines.push(`keys: ${keys.map((key) => `${key}=${pressed[key] === null ? 'unknown' : pressed[key] === true ? 'down' : 'up'}`).join(', ')}`);
-      }
-      return { text: lines.join('\n') };
-    },
+    execute: (args) => runState(args),
   }, 'desktop-control: desktop_state');
+
+  publish({
+    name: 'desktop_find',
+    description:
+      'Locate text on the Windows desktop with local Windows OCR and return its exact screen coordinates — no screenshot and no vision tokens. Matching ignores spaces and case and tolerates OCR misreads. Set click:true to click the best match in the same call. Cheapest way to hit a labelled menu item, button or link; when nothing matches it lists the closest OCR lines so the model can retry. Requires a Windows OCR language pack (normally present).',
+    parameters: FIND_SCHEMA,
+    output: TEXT_OUTPUT,
+    timeoutMs: 120_000,
+    isConcurrencySafe: () => false,
+    execute: (args) => runFind(args),
+  }, 'desktop-control: desktop_find');
+
+  publish({
+    name: 'desktop_window',
+    description:
+      'Windows of the real desktop: action=list lists visible windows (hwnd, process, title, rectangle), action=activate brings one to the foreground, action=elements returns UI Automation controls (role, name, centre point) of a window without a screenshot. UI Automation only sees native controls; Chromium/Electron/Qt custom-drawn surfaces need desktop_find or desktop_screenshot.',
+    parameters: WINDOW_SCHEMA,
+    output: TEXT_OUTPUT,
+    timeoutMs: 90_000,
+    isConcurrencySafe: () => false,
+    execute: (args) => runWindow(args),
+  }, 'desktop-control: desktop_window');
+
+  publish({
+    name: 'desktop_sequence',
+    description:
+      'Run several desktop actions in one call: each step is one action of the desktop_* tools plus its fields (for example [{"action":"find","text":"Save","click":true},{"action":"wait","waitMs":400},{"action":"screenshot"}]). Much cheaper than one tool round-trip per action. A failing step stops the sequence and reports what completed. screenshot steps only save a PNG and return its path.',
+    parameters: SEQUENCE_SCHEMA,
+    output: TEXT_OUTPUT,
+    timeoutMs: 180_000,
+    isConcurrencySafe: () => false,
+    execute: (args) => runSequence(args),
+  }, 'desktop-control: desktop_sequence');
 }

@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Desktop input control",
-    "description": "Lets the session drive the real Windows mouse and keyboard and see the screen: move, click, drag, scroll, type text, press hotkeys and take screenshots."
+    "description": "Lets the session drive the real Windows mouse and keyboard, see the screen, find on-screen text with local OCR, and read UI Automation controls: move, click, drag, scroll, type, press hotkeys, screenshot and batch actions."
   }
 }

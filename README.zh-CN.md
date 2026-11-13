@@ -3,7 +3,7 @@
 [![npm](https://img.shields.io/npm/v/@avengers233/dsh-desktop-control.svg)](https://www.npmjs.com/package/@avengers233/dsh-desktop-control)
 [![license](https://img.shields.io/github/license/Avenger233/dsh-desktop-control.svg)](https://github.com/Avenger233/dsh-desktop-control/blob/main/LICENSE)
 
-让 DeepSeek Harness（dsh）的会话在 Windows 上真正操控鼠标、键盘并截图。
+让 DeepSeek Harness（dsh）的会话在 Windows 上真正操控鼠标、键盘、截图，并能用本地 OCR 与 UI Automation 理解界面。
 
 > 非官方第三方插件，与 DeepSeek 无关。
 > 已在 Windows 10 22H2（19045，Windows PowerShell 5.1）+ dsh `0.2.2-rc.1`（桌面端）、单屏 1920×1080 / 100% 缩放下实测。
@@ -12,7 +12,7 @@
 
 ## 提供什么
 
-安装该 bundle 的 dsh profile 里，所有会话可见四个工具：
+安装该 bundle 的 dsh profile 里，所有会话可见七个工具：
 
 | 工具 | 能力 |
 |---|---|
@@ -20,8 +20,23 @@
 | `desktop_keyboard` | 输入 Unicode 文本（中文、emoji、任意符号）、按快捷键、按住/松开按键 |
 | `desktop_state` | 光标位置、虚拟屏幕范围、前台窗口（进程/标题/矩形）、当前按住的键 |
 | `desktop_screenshot` | 截取整个虚拟桌面或指定区域，以图片形式返回给模型 |
+| `desktop_find` | 用 Windows 自带 OCR 在屏幕上找文字并返回精确坐标，`click:true` 可顺手点击——不产生图片、不消耗视觉 token |
+| `desktop_window` | 列出可见窗口、激活某个窗口，或读取 UIA 控件（角色/名称/中心坐标），不用截图 |
+| `desktop_sequence` | 一次调用批量执行多个动作（点击、找字、等待、截图……） |
 
-四个工具的 schema 在每个会话的每次请求里约 1.3k tokens（不用也占），不需要时建议禁用。
+这些 schema 在每个会话的每次请求里都会占用 token（不用也占），不需要时建议禁用。
+
+### 不截图找字
+
+`desktop_find` 截取屏幕（或指定窗口），用 Windows 自带 OCR 识别后做模糊匹配，返回 `356,358 score=1.00 "保存"` 这样的行；`click:true` 会在同一次调用里点击最佳匹配；没命中时会返回最接近的几行，`threshold` 可调松紧。标着文字的菜单项、按钮、链接用它最省 token。
+
+### 窗口与 UI Automation
+
+`desktop_window` 可列窗口（hwnd/进程/标题/矩形）、激活窗口，或返回 `角色 | 名称 | x,y` 形式的 UIA 控件。原生控件效果好；Chromium/Electron/Qt 自绘界面只能拿到外壳，这类请用 `desktop_find` 或截图。
+
+### 批量动作
+
+`desktop_sequence` 一次调用最多 30 步（find/click/wait/screenshot 等），省掉多次工具往返。其中的 screenshot 只保存 PNG 并返回路径，不返回图片。
 
 ## 要求
 
@@ -62,21 +77,23 @@ bundle 按 profile 安装；源码安装会链接到 clone 目录，之后 `git 
 node scripts/selftest.mjs
 ```
 
-自测会短暂移动光标、按一次 F24、截两张图，最后恢复光标位置；运行期间不要动鼠标。
+自测会短暂移动光标、按一次 F24、打开并关闭一个临时 WinForms 窗口（验证窗口枚举/激活/UIA/OCR）、截两张图，最后恢复光标位置；运行期间不要动鼠标。
 
 ## 使用示例
 
 - “截图给我看看现在屏幕上是什么”
+- “找到屏幕上的‘保存’并点击”
 - “点一下任务栏第三个图标，然后把窗口拖到右边”
 - “在记事本里输入这段话，然后 Ctrl+S 保存”
 - “看看这个网页现在显示什么，再点那个蓝色的按钮”
+- “把窗口切成两半：先激活记事本按 Win+左，再激活浏览器按 Win+右”
 
 模型只在任务需要时调用工具，不会在后台自动操作。
 
 ## 工作原理
 
-- `index.js` — Cordis Host 插件：注册四个工具，首次调用时启动一个 helper 进程，卸载时结束它。
-- `helper.ps1` — 长驻 Windows PowerShell 进程，编译一次 `user32.dll` 的 P/Invoke 包装（`SendInput`、`GetCursorPos` 等）和 .NET `Graphics.CopyFromScreen`，之后逐行应答命令。父子进程之间每条消息是一行 base64(UTF-8 JSON)，因此控制台代码页不会破坏中文文本或窗口标题。
+- `index.js` — Cordis Host 插件：注册七个工具，首次调用时启动一个 helper 进程，卸载时结束它。
+- `helper.ps1` — 长驻 Windows PowerShell 进程，编译一次 `user32.dll` 的 P/Invoke 包装（`SendInput`、`GetCursorPos`、`EnumWindows`、`SetForegroundWindow`、`PrintWindow` 等），再加上 .NET `Graphics.CopyFromScreen`、`Windows.Media.Ocr` 和 UI Automation，之后逐行应答命令。父子进程之间每条消息是一行 base64(UTF-8 JSON)，因此控制台代码页不会破坏中文文本或窗口标题。
 - 截图在超过附件限制时自动缩小，经 dsh 的 `attachments` 服务保存并以 image 内容块返回；同时在 `%TEMP%\dsh-desktop-control` 保留一份 PNG。
 
 坐标是虚拟桌面的物理像素；helper 启用了 per-monitor DPI 感知，保证坐标与屏幕上看到的一致。
@@ -96,6 +113,10 @@ node scripts/selftest.mjs
 - 使用 Raw Input 读取鼠标的游戏可能忽略注入的移动；可配合 `desktop_mouse` 的 `down`/`up` 和 `move`，或改用键盘。
 - 独占全屏游戏、受 DRM 保护的画面可能截成黑屏；无边框全屏和普通窗口正常。
 - 多屏和非 100% 缩放在设计上支持（虚拟桌面坐标 + per-monitor DPI 感知），但未实测，欢迎反馈。
+- `desktop_find` 依赖 Windows OCR：短词、生僻字可能漏检或错字（所以它会返回分数和最接近的行）。需要安装 OCR 语言包，Windows 10/11 通常随显示语言自带。
+- `desktop_window elements` 只能看到原生控件；Chromium/Electron/Qt 自绘界面只返回外壳（用 `desktop_find` 或截图）。
+- 用 `PrintWindow` 抓窗口时，GPU 渲染的应用可能返回空白图；改用前台屏幕截图或先激活窗口。
+- `desktop_sequence` 的各步连续执行、不等界面动画；需要等的地方插一条 `{"action":"wait","waitMs":...}`。
 - 企业 AppLocker / ConstrainedLanguage 策略或安全软件可能拦截 PowerShell helper。
 - 仅 Windows；macOS/Linux 上插件不注册工具，只记一条警告，不会影响共用 profile。
 
@@ -123,7 +144,7 @@ CI 在 `windows-latest` 上做语法检查；真实行为需要桌面环境，CI
 
 ```
 index.js              Host 插件：工具 + helper 生命周期
-helper.ps1            PowerShell 输入/截图服务
+helper.ps1            PowerShell 输入/截图/窗口/OCR/UIA 服务
 cordis.patch.yml      bundle 行（id: desktop-control, name: dsh-desktop-control）
 locale/{en,zh}.json   Plugin Manager 显示信息
 icon.svg              图标
