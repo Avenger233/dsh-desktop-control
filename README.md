@@ -1,5 +1,8 @@
 # dsh-desktop-control
 
+[![npm](https://img.shields.io/npm/v/@avengers233/dsh-desktop-control.svg)](https://www.npmjs.com/package/@avengers233/dsh-desktop-control)
+[![license](https://img.shields.io/github/license/Avenger233/dsh-desktop-control.svg)](https://github.com/Avenger233/dsh-desktop-control/blob/main/LICENSE)
+
 Real mouse, keyboard and screenshot control for DeepSeek Harness (dsh) sessions on Windows.
 
 > Unofficial third-party plugin. Not affiliated with DeepSeek.

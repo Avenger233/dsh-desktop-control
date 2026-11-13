@@ -1,5 +1,8 @@
 # dsh-desktop-control
 
+[![npm](https://img.shields.io/npm/v/@avengers233/dsh-desktop-control.svg)](https://www.npmjs.com/package/@avengers233/dsh-desktop-control)
+[![license](https://img.shields.io/github/license/Avenger233/dsh-desktop-control.svg)](https://github.com/Avenger233/dsh-desktop-control/blob/main/LICENSE)
+
 让 DeepSeek Harness（dsh）的会话在 Windows 上真正操控鼠标、键盘并截图。
 
 > 非官方第三方插件，与 DeepSeek 无关。
