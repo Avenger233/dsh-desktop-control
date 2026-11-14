@@ -133,6 +133,10 @@ This is a high-privilege plugin.
 
 PRs for macOS/Linux are welcome — keep the tool surface identical and add one helper per platform.
 
+## Tool routing beside other computer-use plugins
+
+When an MCP computer-use server such as [dsh-computer-use-win](https://github.com/Yu-tao-Li/dsh-computer-use-win) is enabled in the same profile and exposes `windows_computer_use_*` tools, this plugin adds one short routing rule (about 60 tokens, only while both families are visible): web-page work goes to the MCP browser lane (pass `browserTab`), complex UI Automation / window management / launch_app / wait_for goes to the MCP tools, and everything else keeps the faster `desktop_*` path. Do not mix both families inside one action sequence, and never reuse browser element ids as desktop coordinates. When the MCP tools are absent the section is empty and costs nothing.
+
 ## Development
 
 ```bash

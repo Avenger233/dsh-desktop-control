@@ -133,6 +133,10 @@ node scripts/selftest.mjs
 
 欢迎 PR 增加 macOS/Linux 实现，保持工具面一致、每个平台一个 helper 即可。
 
+## 与其他 computer-use 插件共存时的工具路由
+
+同一个 profile 里还启用了 MCP computer-use 服务（例如 [dsh-computer-use-win](https://github.com/Yu-tao-Li/dsh-computer-use-win)，暴露 `windows_computer_use_*` 工具）时，本插件会追加一条简短的路由规则（约 60 tokens，仅在两套工具同时可见时生效）：网页任务走 MCP 的浏览器通道（传 `browserTab`）；复杂 UIA / 窗口管理 / launch_app / wait_for 走 MCP 工具；其余继续用更快的 `desktop_*`。不要在同一次动作序列里混用两套工具，也不要把浏览器元素 id 当作桌面坐标。MCP 工具不存在时这段提示为空，不产生开销。
+
 ## 开发
 
 ```bash

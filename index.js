@@ -33,6 +33,9 @@ const SCREENSHOT_DIR = join(tmpdir(), 'dsh-desktop-control');
 const SCREENSHOT_KEEP = 30;
 const SCREENSHOT_MAX_DIMENSION = 2400;
 
+const ROUTING_PROMPT = 'Tool routing: desktop_* tools are the fast path for local mouse, keyboard, screenshot, OCR text search and batched desktop actions. When MCP computer-use tools are also available (mcp__wincu__windows_computer_use_* or windows_computer_use_*), use their browser lane (pass browserTab) for web-page work, and their UI Automation tools for complex native control trees, launch_app, window management and wait_for conditions; otherwise prefer desktop_*. Never mix both families inside one action sequence, and never reuse browser element ids as desktop coordinates.';
+
+
 function clampInt(value, fallback, min, max) {
   if (value === undefined || value === null || value === '') return fallback;
   const number = Number(value);
@@ -454,6 +457,25 @@ export function apply(ctx) {
   const server = createInputServer(logger);
   ctx.effect(() => () => server.dispose(), 'desktop-control: input helper process');
   const publish = (definition, label) => ctx.effect(() => ctx.tools.register(definition), label);
+  // Optional routing advice when an MCP computer-use server is also mounted.
+  const systemPrompt = ctx.get('systemPrompt');
+  if (systemPrompt !== undefined) {
+    const routingText = () => {
+      const tools = ctx.tools;
+      if (tools === undefined) return '';
+      const hasMcpComputerUse = [
+        'mcp__wincu__windows_computer_use_snapshot',
+        'windows_computer_use_snapshot',
+      ].some((toolName) => tools.get(toolName) !== undefined);
+      return hasMcpComputerUse ? ROUTING_PROMPT : '';
+    };
+    ctx.effect(() => systemPrompt.section({
+      name: 'desktop-control:tool-routing',
+      order: 9000,
+      text: routingText,
+    }), 'desktop-control: tool routing prompt');
+  }
+
 
   // ---------------------------------------------------------------- runners
   function regionOf(args) {
