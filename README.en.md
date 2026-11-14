@@ -8,7 +8,7 @@ Real mouse, keyboard, screenshot, OCR and UI-Automation control for DeepSeek Har
 > Unofficial third-party plugin. Not affiliated with DeepSeek.
 > Tested with dsh `0.2.2-rc.1` (desktop app) on Windows 10 22H2 (build 19045, Windows PowerShell 5.1), single 1920×1080 display at 100% scaling.
 
-[中文说明](README.md)
+English | [中文](https://github.com/Avenger233/dsh-desktop-control/blob/main/README.md)
 
 ## What you get
 
@@ -143,6 +143,7 @@ When an MCP computer-use server such as [dsh-computer-use-win](https://github.co
 node --check index.js
 node --check scripts/selftest.mjs
 node scripts/selftest.mjs   # Windows + interactive desktop
+npm run publish:npm         # publish to npm using README.en.md as the package page (GitHub keeps the Chinese README)
 ```
 
 CI runs syntax checks on `windows-latest`. Runtime behavior needs a real desktop, so it is not covered by CI.
@@ -159,3 +160,5 @@ scripts/selftest.mjs  manual interactive test
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+[![](https://img.shields.io/badge/powered_by-dsh-4D6BFE?style=flat-square&logo=deepseek&logoColor=white)](https://github.com/deepseek-ai/deepseek-harness)

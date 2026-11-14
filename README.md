@@ -8,7 +8,7 @@
 > 非官方第三方插件，与 DeepSeek 无关。
 > 已在 Windows 10 22H2（19045，Windows PowerShell 5.1）+ dsh `0.2.2-rc.1`（桌面端）、单屏 1920×1080 / 100% 缩放下实测。
 
-[English](README.en.md)
+[English](README.en.md) | 中文
 
 ## 提供什么
 
@@ -143,6 +143,7 @@ node scripts/selftest.mjs
 node --check index.js
 node --check scripts/selftest.mjs
 node scripts/selftest.mjs   # 需要 Windows + 交互式桌面
+npm run publish:npm         # 发布 npm：用 README.en.md 作为包页面（GitHub 主 README 保持中文）
 ```
 
 CI 在 `windows-latest` 上做语法检查；真实行为需要桌面环境，CI 不覆盖。
@@ -159,3 +160,5 @@ scripts/selftest.mjs  手动交互自测
 ## 许可证
 
 MIT，见 [LICENSE](LICENSE)。
+
+[![](https://img.shields.io/badge/powered_by-dsh-4D6BFE?style=flat-square&logo=deepseek&logoColor=white)](https://github.com/deepseek-ai/deepseek-harness)
