@@ -3,159 +3,159 @@
 [![npm](https://img.shields.io/npm/v/@avengers233/dsh-desktop-control.svg)](https://www.npmjs.com/package/@avengers233/dsh-desktop-control)
 [![license](https://img.shields.io/github/license/Avenger233/dsh-desktop-control.svg)](https://github.com/Avenger233/dsh-desktop-control/blob/main/LICENSE)
 
-Real mouse, keyboard, screenshot, OCR and UI-Automation control for DeepSeek Harness (dsh) sessions on Windows.
+让 DeepSeek Harness（dsh）的会话在 Windows 上真正操控鼠标、键盘、截图，并能用本地 OCR 与 UI Automation 理解界面。
 
-> Unofficial third-party plugin. Not affiliated with DeepSeek.
-> Tested with dsh `0.2.2-rc.1` (desktop app) on Windows 10 22H2 (build 19045, Windows PowerShell 5.1), single 1920×1080 display at 100% scaling.
+> 非官方第三方插件，与 DeepSeek 无关。
+> 已在 Windows 10 22H2（19045，Windows PowerShell 5.1）+ dsh `0.2.2-rc.1`（桌面端）、单屏 1920×1080 / 100% 缩放下实测。
 
-[中文说明](README.zh-CN.md)
+[English](README.en.md)
 
-## What you get
+## 提供什么
 
-Seven tools, visible to every session in the dsh profile where the bundle is installed:
+安装该 bundle 的 dsh profile 里，所有会话可见七个工具：
 
-| Tool | Capability |
+| 工具 | 能力 |
 |---|---|
-| `desktop_mouse` | move, click (left/right/middle, single/double/multi), drag, scroll, press/release |
-| `desktop_keyboard` | type Unicode text (Chinese, emoji, any symbol), press hotkeys, hold/release keys |
-| `desktop_state` | cursor position, virtual-screen bounds, foreground window (process/title/rectangle), currently held keys |
-| `desktop_screenshot` | capture the whole virtual desktop or a region and return it to the model as an image; optional labelled coordinate grid and cursor crosshair |
-| `desktop_find` | local Windows OCR locates on-screen text and returns exact screen coordinates; `click:true` clicks it in the same call — no image, no vision tokens |
-| `desktop_window` | list visible windows, activate one, read UI Automation controls (role, name, centre point), or fire a control default action with UIA InvokePattern |
-| `desktop_sequence` | run several actions (click, find, wait, screenshot, ...) in one tool call |
+| `desktop_mouse` | 移动、点击（左/右/中、单击/双击/连击）、拖拽、滚轮、按下/抬起 |
+| `desktop_keyboard` | 输入 Unicode 文本（中文、emoji、任意符号）、按快捷键、按住/松开按键 |
+| `desktop_state` | 光标位置、虚拟屏幕范围、前台窗口（进程/标题/矩形）、当前按住的键 |
+| `desktop_screenshot` | 截取整个虚拟桌面或指定区域，以图片形式返回给模型；可选叠加坐标网格和光标十字 |
+| `desktop_find` | 用 Windows 自带 OCR 在屏幕上找文字并返回精确坐标，`click:true` 可顺手点击——不产生图片、不消耗视觉 token |
+| `desktop_window` | 列出可见窗口、激活某个窗口、读取 UIA 控件（角色/名称/中心坐标），或用 UIA InvokePattern 直接触发控件默认动作 |
+| `desktop_sequence` | 一次调用批量执行多个动作（点击、找字、等待、截图……） |
 
-The schemas are visible to every session in the profile and cost tokens on every request, whether used or not; disable the bundle when you don't need it.
+这些 schema 在每个会话的每次请求里都会占用 token（不用也占），不需要时建议禁用。
 
-### Finding text without screenshots
+### 不截图找字
 
-`desktop_find` captures the screen (or one window), runs Windows' built-in OCR and fuzzy-matches the text, returning lines such as `356,358 score=1.00 "保存"`. `click:true` clicks the best match in the same call; when nothing matches it lists the closest OCR lines so the model can retry, and `threshold` tunes how strict the match is. This is the cheapest way to hit a labelled menu item or button — no image tokens.
+`desktop_find` 截取屏幕（或指定窗口），用 Windows 自带 OCR 识别后做模糊匹配，返回 `356,358 score=1.00 "保存"` 这样的行；`click:true` 会在同一次调用里点击最佳匹配；没命中时会返回最接近的几行，`threshold` 可调松紧。标着文字的菜单项、按钮、链接用它最省 token。
 
-### Windows and UI Automation
+### 窗口与 UI Automation
 
-`desktop_window` lists visible windows (`hwnd`, process, title, rectangle), activates one, or returns UI Automation controls as `role | name | x,y`. `action=invoke` fires a control's default action through UI Automation (InvokePattern, falling back to LegacyIAccessible) without moving the pointer — the most reliable way to press a native button. UIA-native apps (WPF, UWP, Explorer) work well; Chromium, Electron and Qt custom-drawn surfaces expose only their shell — use `desktop_find` or `desktop_screenshot` there.
+`desktop_window` 可列窗口（hwnd/进程/标题/矩形）、激活窗口，或返回 `角色 | 名称 | x,y` 形式的 UIA 控件。`action=invoke` 用 UI Automation 的 InvokePattern（没有则退回 LegacyIAccessible）直接触发控件默认动作，不用移动鼠标，是点原生按钮最可靠的方式。UIA 原生的应用（WPF、UWP、资源管理器）效果好；Chromium/Electron/Qt 自绘界面只能拿到外壳，这类请用 `desktop_find` 或截图。
 
-### Batching
+### 批量动作
 
-`desktop_sequence` runs up to 30 steps in one tool call (`find`, `click`, `wait`, `screenshot`, ...), which saves whole conversation round-trips. Screenshot steps save a PNG and return its path instead of an image.
+`desktop_sequence` 一次调用最多 30 步（find/click/wait/screenshot 等），省掉多次工具往返。其中的 screenshot 只保存 PNG 并返回路径，不返回图片。
 
-## Requirements
+## 要求
 
-- **Windows 10/11**, interactive desktop session (not a service session). Windows 10 1703+ is recommended: it enables per-monitor DPI awareness so coordinates match the screen; older builds fall back to system DPI awareness.
-- **DeepSeek Harness** with a Host process on that Windows machine — the dsh desktop app, or a dsh profile launched there. The plugin is a Host bundle, installed per profile.
-- **Windows PowerShell 5.1** (`powershell.exe`, ships with Windows). PowerShell 7 is not required.
-- No npm dependencies, no build step, no native modules.
+- **Windows 10/11**，交互式桌面会话（不是服务会话）。建议 Windows 10 1703+：可启用 per-monitor DPI 感知，坐标与屏幕一致；更老的版本退化为系统级 DPI 感知。
+- **DeepSeek Harness**，且 Host 进程跑在这台 Windows 机器上（dsh 桌面端，或在该机器启动的 dsh profile）。
+- **Windows PowerShell 5.1**（`powershell.exe`，系统自带），不需要 PowerShell 7。
+- 无 npm 依赖、无构建步骤、无原生模块。
 
-> The tools control the desktop of the machine that runs the dsh Host — not the machine running the browser you view dsh in.
+> 工具控制的是**运行 dsh Host 的那台机器**的桌面，不是你浏览器所在机器的桌面。
 
-## Install
+## 安装
 
-### From npm (recommended)
+### 从 npm 安装（推荐）
 
-Ask the agent in that dsh profile to install the published bundle:
+在该 dsh profile 的会话里让 agent 安装已发布的 bundle：
 
 ```
 plugin_manager { action: "install_bundle", target: "@avengers233/dsh-desktop-control" }
 ```
 
-### From source
+### 从源码安装
 
 ```bash
 git clone https://github.com/Avenger233/dsh-desktop-control.git
 ```
 
-Then ask the agent in that dsh profile to install the directory as a bundle:
+然后在该 dsh profile 的会话里让 agent 把目录作为 bundle 安装：
 
 ```
 plugin_manager { action: "install_bundle", target: "D:\\path\\to\\dsh-desktop-control" }
 ```
 
-The bundle is installed per profile. A source install is linked to the checkout, so a later `git pull` (plus a dsh restart) picks up changes. The first install applies live; no restart needed.
+bundle 按 profile 安装；源码安装会链接到 clone 目录，之后 `git pull` + 重启 dsh 即可更新，首次安装即时生效。
 
-Verify with a screenshot from a session, or run the manual self-test:
+验证：会话里能看到 `desktop_state` 等工具，或手动跑自测：
 
 ```bash
 node scripts/selftest.mjs
 ```
 
-It moves the cursor for a moment, presses F24 once, opens and closes a temporary WPF window, checks window enumeration / activation / UI Automation / InvokePattern / OCR against it, captures screenshots (including the grid and cursor overlay) and restores the cursor. Don't move the mouse while it runs.
+自测会短暂移动光标、按一次 F24、打开并关闭一个临时 WPF 窗口（验证窗口枚举/激活/UIA/InvokePattern/OCR）、截图（含网格和光标叠加），最后恢复光标位置；运行期间不要动鼠标。
 
-## Example prompts
+## 使用示例
 
-- "截图给我看看现在屏幕上是什么"
-- "找到屏幕上的“保存”并点击"
-- "点一下任务栏第三个图标，然后把窗口拖到右边"
-- "在记事本里输入这段话，然后 Ctrl+S 保存"
-- "看看这个网页现在显示什么，再点那个蓝色的按钮"
-- "把窗口切成两半：先激活记事本，按 Win+左，再激活浏览器按 Win+右"
+- “截图给我看看现在屏幕上是什么”
+- “找到屏幕上的‘保存’并点击”
+- “点一下任务栏第三个图标，然后把窗口拖到右边”
+- “在记事本里输入这段话，然后 Ctrl+S 保存”
+- “看看这个网页现在显示什么，再点那个蓝色的按钮”
+- “把窗口切成两半：先激活记事本按 Win+左，再激活浏览器按 Win+右”
 
-Sessions only use the tools when the task calls for it; nothing runs in the background.
+模型只在任务需要时调用工具，不会在后台自动操作。
 
-## How it works
+## 工作原理
 
-- `index.js` — Cordis Host plugin. Registers the seven tools, lazily starts one helper process, and kills it on unload.
-- `helper.ps1` — a long-lived Windows PowerShell process that compiles a small P/Invoke wrapper around `user32.dll` (`SendInput`, `GetCursorPos`, `EnumWindows`, `SetForegroundWindow`, `PrintWindow`, ...), plus .NET `Graphics.CopyFromScreen`, `Windows.Media.Ocr` and UI Automation; then answers one command per line. Parent and child exchange one base64(UTF-8 JSON) line per message, so no console code page can corrupt non-ASCII text or window titles.
-- Screenshots are downscaled when attachment limits require it, saved through dsh's `attachments` service and returned as an image content block; a PNG copy is also written to `%TEMP%\dsh-desktop-control`.
+- `index.js` — Cordis Host 插件：注册七个工具，首次调用时启动一个 helper 进程，卸载时结束它。
+- `helper.ps1` — 长驻 Windows PowerShell 进程，编译一次 `user32.dll` 的 P/Invoke 包装（`SendInput`、`GetCursorPos`、`EnumWindows`、`SetForegroundWindow`、`PrintWindow` 等），再加上 .NET `Graphics.CopyFromScreen`、`Windows.Media.Ocr` 和 UI Automation，之后逐行应答命令。父子进程之间每条消息是一行 base64(UTF-8 JSON)，因此控制台代码页不会破坏中文文本或窗口标题。
+- 截图在超过附件限制时自动缩小，经 dsh 的 `attachments` 服务保存并以 image 内容块返回；同时在 `%TEMP%\dsh-desktop-control` 保留一份 PNG。
 
-Coordinates are physical pixels on the virtual desktop. The helper enables per-monitor DPI awareness so positions match what is on screen.
+坐标是虚拟桌面的物理像素；helper 启用了 per-monitor DPI 感知，保证坐标与屏幕上看到的一致。
 
-## Security and privacy
+## 安全与隐私
 
-This is a high-privilege plugin.
+这是高权限插件。
 
-- Any session in the profile can move/click/type and read screenshots. On profiles configured with `danger-full-access` + `approval: never`, calls execute without asking.
-- Screenshots become session attachments under `$DSH_HOME/attachments` and stay in the session log; treat them like screen recordings.
-- Prompt injection is the main risk: a web page, a file or a chat message can try to make the model click or type. Install this in a profile you use for trusted desktop work, and disable the bundle when you don't need it.
-- To stop it: Plugin Manager → disable or remove the `desktop-control` row. The helper process exits with the plugin.
+- profile 里的任何会话都能移动/点击/输入并截图。若 profile 是 `danger-full-access` + `approval: never`，调用不会弹确认框。
+- 截图会作为会话附件存到 `$DSH_HOME/attachments` 并留在会话记录里，请当作屏幕录像对待。
+- 主要风险是提示注入：网页、文件或聊天内容可能诱导模型点击/输入。建议只在可信的桌面操作 profile 里启用，不用时禁用。
+- 停用方式：Plugin Manager 里禁用/移除 `desktop-control` 行，helper 进程会随插件退出。
 
-## Limitations
+## 限制
 
-- Elevated (administrator) windows, UAC prompts and the lock screen reject injected input (UIPI).
-- Games that read the mouse through raw input may ignore injected movement; use `desktop_mouse` `down`/`up` together with `move`, or keyboard input.
-- Exclusive-fullscreen games and DRM-protected surfaces can produce black screenshots; borderless-fullscreen and normal windows work.
-- Multi-monitor layouts and non-100% DPI scaling are supported by design (virtual-screen coordinates + per-monitor DPI awareness) but have not been tested — please open an issue with your layout.
-- `desktop_find` depends on Windows OCR: short or unusual characters can be missed or misread (that is why it reports scores and closest lines). It needs an OCR language pack; Windows 10/11 normally has one for the display language.
-- `desktop_window elements` sees only native controls; Chromium/Electron/Qt surfaces return just their shell (use `desktop_find` or a screenshot).
-- `desktop_window invoke` needs a control that exposes InvokePattern. UIA-native apps (WPF, UWP, Explorer) usually do; some classic Win32/MSAA controls surface as a generic Pane without it — click them by coordinates instead.
-- A window captured with `PrintWindow` can come back blank for GPU-rendered apps; capture the foreground screen or activate the window instead.
-- `desktop_sequence` steps run back to back without waiting for animations; add `{"action":"wait","waitMs":...}` where the UI needs time.
-- Enterprise AppLocker / constrained-language policies or security software can block the PowerShell helper.
-- Windows-only by design: on macOS and Linux the plugin registers no tools and logs one warning, so a shared profile does not break.
+- 管理员权限窗口、UAC 弹窗、锁屏/安全桌面会拒绝注入输入（UIPI）。
+- 使用 Raw Input 读取鼠标的游戏可能忽略注入的移动；可配合 `desktop_mouse` 的 `down`/`up` 和 `move`，或改用键盘。
+- 独占全屏游戏、受 DRM 保护的画面可能截成黑屏；无边框全屏和普通窗口正常。
+- 多屏和非 100% 缩放在设计上支持（虚拟桌面坐标 + per-monitor DPI 感知），但未实测，欢迎反馈。
+- `desktop_find` 依赖 Windows OCR：短词、生僻字可能漏检或错字（所以它会返回分数和最接近的行）。需要安装 OCR 语言包，Windows 10/11 通常随显示语言自带。
+- `desktop_window elements` 只能看到原生控件；Chromium/Electron/Qt 自绘界面只返回外壳（用 `desktop_find` 或截图）。
+- `desktop_window invoke` 需要控件暴露 InvokePattern：UIA 原生应用（WPF、UWP、资源管理器）一般都有；部分经典 Win32/MSAA 控件只会暴露成通用 Pane 而没有该能力，这时改用坐标点击。
+- 用 `PrintWindow` 抓窗口时，GPU 渲染的应用可能返回空白图；改用前台屏幕截图或先激活窗口。
+- `desktop_sequence` 的各步连续执行、不等界面动画；需要等的地方插一条 `{"action":"wait","waitMs":...}`。
+- 企业 AppLocker / ConstrainedLanguage 策略或安全软件可能拦截 PowerShell helper。
+- 仅 Windows；macOS/Linux 上插件不注册工具，只记一条警告，不会影响共用 profile。
 
-## Platform support
+## 平台支持
 
-| Platform | Status |
+| 平台 | 状态 |
 |---|---|
-| Windows 10 22H2 (19045) | ✅ tested |
-| Windows 11 | ⚠️ not tested (same `user32.dll` APIs; expected to work) |
-| Windows 8.1 | ⚠️ untested (per-monitor DPI falls back to system DPI awareness) |
-| macOS | ❌ not implemented (CGEvent / cliclick or AppleScript would be needed) |
-| Linux | ❌ not implemented (X11: XTest / xdotool; Wayland: ydotool) |
+| Windows 10 22H2 (19045) | ✅ 已测试 |
+| Windows 11 | ⚠️ 未测试（user32 API 相同，预期可用） |
+| Windows 8.1 | ⚠️ 未测试（per-monitor DPI 会退化为系统级 DPI 感知） |
+| macOS | ❌ 未实现（需 CGEvent / cliclick 或 AppleScript） |
+| Linux | ❌ 未实现（X11: XTest / xdotool；Wayland: ydotool） |
 
-PRs for macOS/Linux are welcome — keep the tool surface identical and add one helper per platform.
+欢迎 PR 增加 macOS/Linux 实现，保持工具面一致、每个平台一个 helper 即可。
 
-## Tool routing beside other computer-use plugins
+## 与其他 computer-use 插件共存时的工具路由
 
-When an MCP computer-use server such as [dsh-computer-use-win](https://github.com/Yu-tao-Li/dsh-computer-use-win) is enabled in the same profile and exposes `windows_computer_use_*` tools, this plugin adds one short routing rule (about 60 tokens, only while both families are visible): web-page work goes to the MCP browser lane (pass `browserTab`), complex UI Automation / window management / launch_app / wait_for goes to the MCP tools, and everything else keeps the faster `desktop_*` path. Do not mix both families inside one action sequence, and never reuse browser element ids as desktop coordinates. When the MCP tools are absent the section is empty and costs nothing.
+同一个 profile 里还启用了 MCP computer-use 服务（例如 [dsh-computer-use-win](https://github.com/Yu-tao-Li/dsh-computer-use-win)，暴露 `windows_computer_use_*` 工具）时，本插件会追加一条简短的路由规则（约 60 tokens，仅在两套工具同时可见时生效）：网页任务走 MCP 的浏览器通道（传 `browserTab`）；复杂 UIA / 窗口管理 / launch_app / wait_for 走 MCP 工具；其余继续用更快的 `desktop_*`。不要在同一次动作序列里混用两套工具，也不要把浏览器元素 id 当作桌面坐标。MCP 工具不存在时这段提示为空，不产生开销。
 
-## Development
+## 开发
 
 ```bash
 node --check index.js
 node --check scripts/selftest.mjs
-node scripts/selftest.mjs   # Windows + interactive desktop
+node scripts/selftest.mjs   # 需要 Windows + 交互式桌面
 ```
 
-CI runs syntax checks on `windows-latest`. Runtime behavior needs a real desktop, so it is not covered by CI.
+CI 在 `windows-latest` 上做语法检查；真实行为需要桌面环境，CI 不覆盖。
 
 ```
-index.js              Host plugin: tools + helper lifecycle
-helper.ps1            PowerShell input / screenshot / window / OCR / UIA server
-cordis.patch.yml      bundle row (id: desktop-control, name: dsh-desktop-control)
-locale/{en,zh}.json   Plugin Manager display metadata
-icon.svg              icon
-scripts/selftest.mjs  manual interactive test
+index.js              Host 插件：工具 + helper 生命周期
+helper.ps1            PowerShell 输入/截图/窗口/OCR/UIA 服务
+cordis.patch.yml      bundle 行（id: desktop-control, name: dsh-desktop-control）
+locale/{en,zh}.json   Plugin Manager 显示信息
+icon.svg              图标
+scripts/selftest.mjs  手动交互自测
 ```
 
-## License
+## 许可证
 
-MIT — see [LICENSE](LICENSE).
+MIT，见 [LICENSE](LICENSE)。
